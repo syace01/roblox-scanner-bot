@@ -183,6 +183,7 @@ class Bot(discord.Client):
         self.session = aiohttp.ClientSession()
         self.downloader = UniversalDownloader()
         
+        # Register commands
         @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
         @app_commands.describe(image="Screenshot to scan", hint="Optional username hint")
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
@@ -198,8 +199,8 @@ class Bot(discord.Client):
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
             await self.do_whitelist(interaction, user)
         
+        # Sync commands (removed the clear_commands line that was causing issues)
         try:
-            self.tree.clear_commands(guild=None)
             synced = await self.tree.sync()
             print(f"✅ Synced {len(synced)} commands globally:")
             for cmd in synced:
