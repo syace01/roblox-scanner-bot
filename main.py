@@ -217,7 +217,7 @@ class Bot(discord.Client):
         
         await interaction.response.defer(ephemeral=True)
         
-        target_id = re.sub(r[<@!>], '', user_input).strip()
+        target_id = re.sub(r'[<@!>]', '', user_input).strip()
         
         if not target_id.isdigit():
             await interaction.followup.send("❌ Invalid user ID! Use @mention or ID", ephemeral=True)
@@ -530,3 +530,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
