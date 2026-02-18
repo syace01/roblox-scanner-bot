@@ -85,8 +85,6 @@ class UniversalDownloader:
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                         'Accept-Language': 'en-us,en;q=0.5',
                     },
-                    # For direct URLs and generic extractors
-                    'force_generic_extractor': False,
                 }
                 
                 try:
@@ -208,19 +206,24 @@ class Bot(discord.Client):
         async def download(interaction: discord.Interaction, url: str):
             await self.do_download(interaction, url)
         
+        # Simple whitelist command
         @self.tree.command(name="whitelist", description="⚙️ Add/Remove user from whitelist (Owner only)")
         @app_commands.describe(user="User to whitelist/unwhitelist (@mention or ID)")
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
             await self.do_whitelist(interaction, user)
         
-        # Sync commands
+        # Force clear old commands and sync fresh
         try:
+            # Clear all commands first to avoid conflicts
+            self.tree.clear_commands(guild=None)
+            # Now sync fresh
             synced = await self.tree.sync()
             print(f"✅ Synced {len(synced)} commands globally:")
             for cmd in synced:
                 print(f"   - /{cmd.name}")
         except Exception as e:
             print(f"⚠️ Command sync error: {e}")
+            traceback.print_exc()
         
         print("✅ Bot setup complete!")
     
