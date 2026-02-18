@@ -11,6 +11,7 @@ import warnings
 import traceback
 import tempfile
 import shutil
+import subprocess
 from datetime import datetime
 
 warnings.filterwarnings('ignore')
@@ -33,7 +34,6 @@ try:
     import discord
     from discord import app_commands
     import aiohttp
-    from PIL import Image
     print("✅ Core imports successful")
 except Exception as e:
     print(f"❌ Import error: {e}")
@@ -57,47 +57,83 @@ class VideoDownloader:
             return {"success": False, "error": "yt-dlp not installed"}
         
         dl_id = f"{user_id}_{int(time.time())}"
-        output = os.path.join(self.path, f"{dl_id}.%(ext)s")
+        output_path = os.path.join(self.path, dl_id)
         
         try:
             loop = asyncio.get_event_loop()
             
             def dl():
-                # FIXED: Better format selection for Medal.tv and others
-                ydl_opts = {
-                    'format': 'best[filesize<25M]/bestvideo[filesize<25M]+bestaudio[filesize<25M]/best[filesize<25M]/worst',
-                    'outtmpl': output,
+                # First, get available formats
+                ydl_opts_info = {
                     'quiet': True,
                     'no_warnings': True,
-                    'max_filesize': 25 * 1024 * 1024,
-                    'merge_output_format': 'mp4',
-                    'postprocessors': [{
-                        'key': 'FFmpegVideoConvertor',
-                        'preferedformat': 'mp4',
-                    }],
-                    # Add headers to avoid blocking
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0'
-                    }
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    return info
+                
+                with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    formats = info.get('formats', [])
+                    
+                    # Find best format under 25MB
+                    best_format = None
+                    for f in formats:
+                        filesize = f.get('filesize') or f.get('filesize_approx', 0)
+                        if filesize and filesize < 25 * 1024 * 1024:
+                            if not best_format or filesize > best_format.get('filesize', 0):
+                                best_format = f
+                    
+                    # If no format found with size info, try to estimate
+                    if not best_format:
+                        # Try formats that usually work
+                        for fmt in ['best[height<=720]', 'best[height<=480]', 'best[height<=360]', 'worst']:
+                            try:
+                                ydl_opts = {
+                                    'format': fmt,
+                                    'outtmpl': f"{output_path}.%(ext)s",
+                                    'quiet': True,
+                                    'no_warnings': True,
+                                    'max_filesize': 25 * 1024 * 1024,
+                                    'merge_output_format': 'mp4',
+                                }
+                                with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                                    info2 = ydl2.extract_info(url, download=True)
+                                    downloaded_files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
+                                    if downloaded_files:
+                                        actual_file = os.path.join(self.path, downloaded_files[0])
+                                        return {
+                                            "success": True,
+                                            "file_path": actual_file,
+                                            "title": info2.get('title', 'video'),
+                                            "size": os.path.getsize(actual_file),
+                                        }
+                            except Exception as e:
+                                continue
+                    
+                    # Download with best found format
+                    if best_format:
+                        format_id = best_format['format_id']
+                        ydl_opts = {
+                            'format': format_id,
+                            'outtmpl': f"{output_path}.%(ext)s",
+                            'quiet': True,
+                            'no_warnings': True,
+                            'max_filesize': 25 * 1024 * 1024,
+                            'merge_output_format': 'mp4',
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                            info2 = ydl2.extract_info(url, download=True)
+                            downloaded_files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
+                            if downloaded_files:
+                                actual_file = os.path.join(self.path, downloaded_files[0])
+                                return {
+                                    "success": True,
+                                    "file_path": actual_file,
+                                    "title": info2.get('title', 'video'),
+                                    "size": os.path.getsize(actual_file),
+                                }
+                
+                return {"success": False, "error": "No suitable format found"}
             
-            result = await asyncio.wait_for(loop.run_in_executor(None, dl), timeout=120)
-            
-            # Find the downloaded file
-            files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
-            if files:
-                actual = os.path.join(self.path, files[0])
-                return {
-                    "success": True,
-                    "file_path": actual,
-                    "title": result.get('title', 'video') if isinstance(result, dict) else 'video',
-                    "size": os.path.getsize(actual),
-                }
-            else:
-                return {"success": False, "error": "File not found after download"}
+            return await asyncio.wait_for(loop.run_in_executor(None, dl), timeout=120)
                 
         except Exception as e:
             return {"success": False, "error": str(e)[:200]}
@@ -122,7 +158,6 @@ class Bot(discord.Client):
         self.whitelist_file = 'whitelist.json'
     
     def save_whitelist(self):
-        """Save whitelist to file"""
         try:
             with open(self.whitelist_file, 'w') as f:
                 json.dump({"users": list(self.whitelist)}, f)
@@ -134,7 +169,7 @@ class Bot(discord.Client):
     async def setup_hook(self):
         print("🔧 Setting up bot...")
         
-        # Load whitelist from file
+        # Load whitelist
         try:
             if os.path.exists(self.whitelist_file):
                 with open(self.whitelist_file, 'r') as f:
@@ -161,112 +196,124 @@ class Bot(discord.Client):
         async def download(interaction: discord.Interaction, url: str):
             await self.do_download(interaction, url)
         
-        # NEW: Whitelist command group
-        @self.tree.command(name="whitelist", description="⚙️ Manage whitelisted users (Owner only)")
-        @app_commands.describe(action="Action to perform", user="User to add/remove (ID or mention)")
-        @app_commands.choices(action=[
-            app_commands.Choice(name="add", value="add"),
-            app_commands.Choice(name="remove", value="remove"),
-            app_commands.Choice(name="list", value="list"),
-            app_commands.Choice(name="check", value="check"),
-        ])
-        async def whitelist_cmd(interaction: discord.Interaction, action: app_commands.Choice[str], user: str = None):
-            await self.do_whitelist(interaction, action.value, user)
+        # Whitelist group
+        whitelist_group = app_commands.Group(name="whitelist", description="⚙️ Manage whitelisted users (Owner only)")
         
-        # Sync commands globally
+        @whitelist_group.command(name="add", description="Add user to whitelist")
+        @app_commands.describe(user="User ID to add")
+        async def wl_add(interaction: discord.Interaction, user: str):
+            await self.whitelist_add(interaction, user)
+        
+        @whitelist_group.command(name="remove", description="Remove user from whitelist")
+        @app_commands.describe(user="User ID to remove")
+        async def wl_remove(interaction: discord.Interaction, user: str):
+            await self.whitelist_remove(interaction, user)
+        
+        @whitelist_group.command(name="list", description="List all whitelisted users")
+        async def wl_list(interaction: discord.Interaction):
+            await self.whitelist_list(interaction)
+        
+        @whitelist_group.command(name="check", description="Check if user is whitelisted")
+        @app_commands.describe(user="User ID to check")
+        async def wl_check(interaction: discord.Interaction, user: str):
+            await self.whitelist_check(interaction, user)
+        
+        self.tree.add_command(whitelist_group)
+        
+        # Sync commands
         try:
             synced = await self.tree.sync()
             print(f"✅ Synced {len(synced)} commands globally")
+            for cmd in synced:
+                print(f"   - /{cmd.name}")
         except Exception as e:
             print(f"⚠️ Command sync error: {e}")
         
         print("✅ Bot setup complete!")
     
-    async def do_whitelist(self, interaction: discord.Interaction, action: str, user_input: str = None):
-        """Handle whitelist management"""
-        user_id = str(interaction.user.id)
-        
-        # Only owner can manage whitelist
-        if user_id != str(OWNER_ID):
-            await interaction.response.send_message("⛔ Only the bot owner can manage whitelist!", ephemeral=True)
+    async def whitelist_add(self, interaction: discord.Interaction, user_input: str):
+        if str(interaction.user.id) != str(OWNER_ID):
+            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
             return
         
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         
-        if action == "list":
-            if not self.whitelist:
-                await interaction.followup.send("📋 Whitelist is empty!", ephemeral=True)
-                return
-            
-            users_list = []
-            for uid in sorted(self.whitelist):
-                try:
-                    user = await self.fetch_user(int(uid))
-                    name = f"{user.name}#{user.discriminator}" if user else f"Unknown ({uid})"
-                    users_list.append(f"• `{uid}` - {name}")
-                except:
-                    users_list.append(f"• `{uid}` - Unknown")
-            
-            embed = discord.Embed(
-                title="📋 Whitelisted Users",
-                description="\n".join(users_list) or "None",
-                color=0x00D4AA
-            )
-            embed.set_footer(text=f"Total: {len(self.whitelist)} users")
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-        
-        if action == "check":
-            if not user_input:
-                await interaction.followup.send("❌ Please provide a user ID to check!", ephemeral=True)
-                return
-            
-            # Extract ID from mention or use as-is
-            check_id = re.sub(r[<@!>], '', user_input).strip()
-            is_whitelisted = check_id in self.whitelist
-            
-            status = "✅ Whitelisted" if is_whitelisted else "❌ Not whitelisted"
-            await interaction.followup.send(f"{status} - `{check_id}`", ephemeral=True)
-            return
-        
-        # Add/Remove need user input
-        if not user_input:
-            await interaction.followup.send("❌ Please provide a user ID!", ephemeral=True)
-            return
-        
-        # Extract ID from mention or use as-is
         target_id = re.sub(r[<@!>], '', user_input).strip()
-        
-        # Validate ID
         if not target_id.isdigit():
-            await interaction.followup.send("❌ Invalid user ID! Use the user's ID or mention them.", ephemeral=True)
+            await interaction.followup.send("❌ Invalid user ID!", ephemeral=True)
             return
         
-        if action == "add":
-            if target_id in self.whitelist:
-                await interaction.followup.send(f"⚠️ User `{target_id}` is already whitelisted!", ephemeral=True)
-                return
-            
-            self.whitelist.add(target_id)
-            if self.save_whitelist():
-                await interaction.followup.send(f"✅ Added `{target_id}` to whitelist!", ephemeral=True)
-            else:
-                await interaction.followup.send("❌ Failed to save whitelist!", ephemeral=True)
+        if target_id in self.whitelist:
+            await interaction.followup.send(f"⚠️ `{target_id}` already whitelisted!", ephemeral=True)
+            return
         
-        elif action == "remove":
-            if target_id == str(OWNER_ID):
-                await interaction.followup.send("⛔ Cannot remove the owner!", ephemeral=True)
-                return
-            
-            if target_id not in self.whitelist:
-                await interaction.followup.send(f"⚠️ User `{target_id}` is not in whitelist!", ephemeral=True)
-                return
-            
-            self.whitelist.remove(target_id)
-            if self.save_whitelist():
-                await interaction.followup.send(f"✅ Removed `{target_id}` from whitelist!", ephemeral=True)
-            else:
-                await interaction.followup.send("❌ Failed to save whitelist!", ephemeral=True)
+        self.whitelist.add(target_id)
+        if self.save_whitelist():
+            await interaction.followup.send(f"✅ Added `{target_id}`!", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Save failed!", ephemeral=True)
+    
+    async def whitelist_remove(self, interaction: discord.Interaction, user_input: str):
+        if str(interaction.user.id) != str(OWNER_ID):
+            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        target_id = re.sub(r[<@!>], '', user_input).strip()
+        if not target_id.isdigit():
+            await interaction.followup.send("❌ Invalid user ID!", ephemeral=True)
+            return
+        
+        if target_id == str(OWNER_ID):
+            await interaction.followup.send("⛔ Can't remove owner!", ephemeral=True)
+            return
+        
+        if target_id not in self.whitelist:
+            await interaction.followup.send(f"⚠️ `{target_id}` not in whitelist!", ephemeral=True)
+            return
+        
+        self.whitelist.remove(target_id)
+        if self.save_whitelist():
+            await interaction.followup.send(f"✅ Removed `{target_id}`!", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Save failed!", ephemeral=True)
+    
+    async def whitelist_list(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != str(OWNER_ID):
+            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        if not self.whitelist:
+            await interaction.followup.send("📋 Empty!", ephemeral=True)
+            return
+        
+        users = []
+        for uid in sorted(self.whitelist):
+            try:
+                user = await self.fetch_user(int(uid))
+                name = user.name if user else "Unknown"
+                users.append(f"• `{uid}` - {name}")
+            except:
+                users.append(f"• `{uid}` - Unknown")
+        
+        embed = discord.Embed(title="📋 Whitelist", description="\n".join(users), color=0x00D4AA)
+        embed.set_footer(text=f"Total: {len(self.whitelist)}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    async def whitelist_check(self, interaction: discord.Interaction, user_input: str):
+        if str(interaction.user.id) != str(OWNER_ID):
+            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        target_id = re.sub(r[<@!>], '', user_input).strip()
+        is_wl = target_id in self.whitelist
+        status = "✅ Whitelisted" if is_wl else "❌ Not whitelisted"
+        await interaction.followup.send(f"{status} - `{target_id}`", ephemeral=True)
     
     async def do_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str):
         user_id = str(interaction.user.id)
@@ -278,12 +325,10 @@ class Bot(discord.Client):
         await interaction.response.defer(thinking=True)
         
         try:
-            # Validate image
             if image.size and image.size > 50 * 1024 * 1024:
                 await interaction.followup.send("❌ Image too large (max 50MB)")
                 return
             
-            # Download image
             async with self.session.get(image.url, timeout=30) as resp:
                 if resp.status != 200:
                     await interaction.followup.send(f"❌ Failed to download image: {resp.status}")
@@ -294,7 +339,6 @@ class Bot(discord.Client):
                 await interaction.followup.send("❌ Image too small")
                 return
             
-            # OCR with OCR.space
             b64 = base64.b64encode(img_data).decode()
             data = {
                 'apikey': OCR_SPACE_KEY,
@@ -312,16 +356,10 @@ class Bot(discord.Client):
                 await interaction.followup.send("❌ No text found in image")
                 return
             
-            # Find usernames - multiple patterns
             usernames = []
-            
-            # Pattern 1: @username
             usernames.extend(re.findall(r'@([A-Za-z0-9_]{3,20})\b', text))
-            
-            # Pattern 2: roblox.com/users/ID
             id_matches = re.findall(r'roblox\.com/users/(\d+)', text, re.IGNORECASE)
             
-            # Pattern 3: standalone username (if hint provided)
             if hint:
                 hint = hint.strip()
                 if re.match(r'^[A-Za-z0-9_]{3,20}$', hint):
@@ -332,22 +370,17 @@ class Bot(discord.Client):
                 await interaction.followup.send(f"❌ No username found. OCR saw: ```{preview}...```")
                 return
             
-            # Try to resolve user
             user_info = None
-            resolved_username = None
             
-            # Try ID first (most reliable)
             if id_matches:
                 try:
                     uid = int(id_matches[0])
                     async with self.session.get(f'https://users.roblox.com/v1/users/{uid}', timeout=10) as resp:
                         if resp.status == 200:
                             user_info = await resp.json()
-                            resolved_username = user_info.get('name')
                 except Exception as e:
                     print(f"ID lookup error: {e}")
             
-            # Try username lookup
             if not user_info and usernames:
                 for username in usernames[:3]:
                     try:
@@ -362,7 +395,6 @@ class Bot(discord.Client):
                                 async with self.session.get(f'https://users.roblox.com/v1/users/{user_data["id"]}', timeout=10) as resp:
                                     if resp.status == 200:
                                         user_info = await resp.json()
-                                        resolved_username = username
                                         break
                     except Exception as e:
                         print(f"Username lookup error for {username}: {e}")
@@ -373,7 +405,6 @@ class Bot(discord.Client):
                 await interaction.followup.send(f"❌ Could not resolve user. Tried: `{tried}`")
                 return
             
-            # Build embed
             color = 0xFF0000 if user_info.get('isBanned') else 0x00D4AA
             
             embed = discord.Embed(
@@ -415,7 +446,6 @@ class Bot(discord.Client):
             await interaction.response.send_message("❌ Invalid URL", ephemeral=True)
             return
         
-        # Check supported sites
         supported = ['youtube', 'youtu.be', 'tiktok', 'instagram', 'twitter', 'x.com', 'reddit', 'streamable', 'medal.tv', 'medal']
         if not any(site in url.lower() for site in supported):
             await interaction.response.send_message(
@@ -436,11 +466,10 @@ class Bot(discord.Client):
             size_mb = result['size'] / (1024 * 1024)
             
             if result['size'] > 25 * 1024 * 1024:
-                await interaction.followup.send(f"⚠️ File too large ({size_mb:.1f}MB). Max is 25MB for Discord.")
+                await interaction.followup.send(f"⚠️ File too large ({size_mb:.1f}MB). Max is 25MB.")
                 self.downloader.cleanup(result['file_path'])
                 return
             
-            # Sanitize filename
             safe_title = re.sub(r'[^\w\-_.]', '_', result['title'][:40])
             filename = f"{safe_title}.mp4"
             
