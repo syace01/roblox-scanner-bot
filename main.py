@@ -13,6 +13,7 @@ import tempfile
 import shutil
 import subprocess
 from datetime import datetime
+from urllib.parse import urlparse
 
 warnings.filterwarnings('ignore')
 
@@ -48,7 +49,7 @@ except:
     YTDLP_AVAILABLE = False
     print("⚠️ yt-dlp not available")
 
-class VideoDownloader:
+class UniversalDownloader:
     def __init__(self):
         self.path = tempfile.mkdtemp()
     
@@ -57,86 +58,97 @@ class VideoDownloader:
             return {"success": False, "error": "yt-dlp not installed"}
         
         dl_id = f"{user_id}_{int(time.time())}"
-        output_path = os.path.join(self.path, dl_id)
+        output_template = os.path.join(self.path, f"{dl_id}.%(ext)s")
         
         try:
             loop = asyncio.get_event_loop()
             
             def dl():
-                # First, get available formats
-                ydl_opts_info = {
+                # Universal options that work with ANY site
+                ydl_opts = {
+                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                    'outtmpl': output_template,
                     'quiet': True,
                     'no_warnings': True,
+                    'max_filesize': 25 * 1024 * 1024,
+                    'merge_output_format': 'mp4',
+                    'postprocessors': [{
+                        'key': 'FFmpegVideoConvertor',
+                        'preferedformat': 'mp4',
+                    }],
+                    # Bypass restrictions
+                    'geo_bypass': True,
+                    'nocheckcertificate': True,
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0',
+                    'headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'en-us,en;q=0.5',
+                    },
+                    # For direct URLs and generic extractors
+                    'force_generic_extractor': False,
                 }
                 
-                with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    formats = info.get('formats', [])
-                    
-                    # Find best format under 25MB
-                    best_format = None
-                    for f in formats:
-                        filesize = f.get('filesize') or f.get('filesize_approx', 0)
-                        if filesize and filesize < 25 * 1024 * 1024:
-                            if not best_format or filesize > best_format.get('filesize', 0):
-                                best_format = f
-                    
-                    # If no format found with size info, try to estimate
-                    if not best_format:
-                        # Try formats that usually work
-                        for fmt in ['best[height<=720]', 'best[height<=480]', 'best[height<=360]', 'worst']:
-                            try:
-                                ydl_opts = {
-                                    'format': fmt,
-                                    'outtmpl': f"{output_path}.%(ext)s",
-                                    'quiet': True,
-                                    'no_warnings': True,
-                                    'max_filesize': 25 * 1024 * 1024,
-                                    'merge_output_format': 'mp4',
-                                }
-                                with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
-                                    info2 = ydl2.extract_info(url, download=True)
-                                    downloaded_files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
-                                    if downloaded_files:
-                                        actual_file = os.path.join(self.path, downloaded_files[0])
-                                        return {
-                                            "success": True,
-                                            "file_path": actual_file,
-                                            "title": info2.get('title', 'video'),
-                                            "size": os.path.getsize(actual_file),
-                                        }
-                            except Exception as e:
-                                continue
-                    
-                    # Download with best found format
-                    if best_format:
-                        format_id = best_format['format_id']
-                        ydl_opts = {
-                            'format': format_id,
-                            'outtmpl': f"{output_path}.%(ext)s",
-                            'quiet': True,
-                            'no_warnings': True,
-                            'max_filesize': 25 * 1024 * 1024,
-                            'merge_output_format': 'mp4',
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        
+                        # Find the downloaded file
+                        downloaded_files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
+                        
+                        if not downloaded_files:
+                            return {"success": False, "error": "No file downloaded"}
+                        
+                        actual_file = os.path.join(self.path, downloaded_files[0])
+                        file_size = os.path.getsize(actual_file)
+                        
+                        # If not mp4, try to convert or rename
+                        if not actual_file.endswith('.mp4'):
+                            mp4_file = actual_file.rsplit('.', 1)[0] + '.mp4'
+                            if os.path.exists(actual_file):
+                                # Try ffmpeg convert if available
+                                try:
+                                    subprocess.run(['ffmpeg', '-i', actual_file, '-c', 'copy', mp4_file, '-y'], 
+                                                 capture_output=True, timeout=30)
+                                    if os.path.exists(mp4_file):
+                                        os.remove(actual_file)
+                                        actual_file = mp4_file
+                                        file_size = os.path.getsize(actual_file)
+                                except:
+                                    # Just rename if ffmpeg not available
+                                    os.rename(actual_file, mp4_file)
+                                    actual_file = mp4_file
+                        
+                        return {
+                            "success": True,
+                            "file_path": actual_file,
+                            "title": info.get('title', 'video') if isinstance(info, dict) else 'video',
+                            "size": file_size,
                         }
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    # If format error, try with no format specified
+                    if 'format' in error_msg.lower():
+                        ydl_opts['format'] = None
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
-                            info2 = ydl2.extract_info(url, download=True)
+                            info = ydl2.extract_info(url, download=True)
                             downloaded_files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
                             if downloaded_files:
                                 actual_file = os.path.join(self.path, downloaded_files[0])
                                 return {
                                     "success": True,
                                     "file_path": actual_file,
-                                    "title": info2.get('title', 'video'),
+                                    "title": info.get('title', 'video') if isinstance(info, dict) else 'video',
                                     "size": os.path.getsize(actual_file),
                                 }
-                
-                return {"success": False, "error": "No suitable format found"}
+                    raise e
             
-            return await asyncio.wait_for(loop.run_in_executor(None, dl), timeout=120)
+            return await asyncio.wait_for(loop.run_in_executor(None, dl), timeout=180)
                 
         except Exception as e:
-            return {"success": False, "error": str(e)[:200]}
+            print(f"Download error: {e}")
+            return {"success": False, "error": str(e)[:250]}
     
     def cleanup(self, file_path: str):
         try:
@@ -183,7 +195,7 @@ class Bot(discord.Client):
             print(f"⚠️ Whitelist error: {e}")
         
         self.session = aiohttp.ClientSession()
-        self.downloader = VideoDownloader()
+        self.downloader = UniversalDownloader()
         
         # Register commands
         @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
@@ -191,39 +203,20 @@ class Bot(discord.Client):
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
             await self.do_scan(interaction, image, hint)
         
-        @self.tree.command(name="download", description="📥 Download video from URL")
-        @app_commands.describe(url="Video URL to download")
+        @self.tree.command(name="download", description="📥 Download any video to MP4")
+        @app_commands.describe(url="Any video URL (YouTube, Medal, Streamable, direct MP4, etc.)")
         async def download(interaction: discord.Interaction, url: str):
             await self.do_download(interaction, url)
         
-        # Whitelist group
-        whitelist_group = app_commands.Group(name="whitelist", description="⚙️ Manage whitelisted users (Owner only)")
-        
-        @whitelist_group.command(name="add", description="Add user to whitelist")
-        @app_commands.describe(user="User ID to add")
-        async def wl_add(interaction: discord.Interaction, user: str):
-            await self.whitelist_add(interaction, user)
-        
-        @whitelist_group.command(name="remove", description="Remove user from whitelist")
-        @app_commands.describe(user="User ID to remove")
-        async def wl_remove(interaction: discord.Interaction, user: str):
-            await self.whitelist_remove(interaction, user)
-        
-        @whitelist_group.command(name="list", description="List all whitelisted users")
-        async def wl_list(interaction: discord.Interaction):
-            await self.whitelist_list(interaction)
-        
-        @whitelist_group.command(name="check", description="Check if user is whitelisted")
-        @app_commands.describe(user="User ID to check")
-        async def wl_check(interaction: discord.Interaction, user: str):
-            await self.whitelist_check(interaction, user)
-        
-        self.tree.add_command(whitelist_group)
+        @self.tree.command(name="whitelist", description="⚙️ Add/Remove user from whitelist (Owner only)")
+        @app_commands.describe(user="User to whitelist/unwhitelist (@mention or ID)")
+        async def whitelist_cmd(interaction: discord.Interaction, user: str):
+            await self.do_whitelist(interaction, user)
         
         # Sync commands
         try:
             synced = await self.tree.sync()
-            print(f"✅ Synced {len(synced)} commands globally")
+            print(f"✅ Synced {len(synced)} commands globally:")
             for cmd in synced:
                 print(f"   - /{cmd.name}")
         except Exception as e:
@@ -231,89 +224,49 @@ class Bot(discord.Client):
         
         print("✅ Bot setup complete!")
     
-    async def whitelist_add(self, interaction: discord.Interaction, user_input: str):
+    async def do_whitelist(self, interaction: discord.Interaction, user_input: str):
+        """Simple whitelist toggle - add if not exists, remove if exists"""
         if str(interaction.user.id) != str(OWNER_ID):
-            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
+            await interaction.response.send_message("⛔ Only owner can use this!", ephemeral=True)
             return
         
         await interaction.response.defer(ephemeral=True)
         
+        # Extract ID from mention or use as-is
         target_id = re.sub(r[<@!>], '', user_input).strip()
+        
         if not target_id.isdigit():
-            await interaction.followup.send("❌ Invalid user ID!", ephemeral=True)
+            await interaction.followup.send("❌ Invalid user ID! Use @mention or ID", ephemeral=True)
             return
         
+        # Toggle: remove if exists, add if not
         if target_id in self.whitelist:
-            await interaction.followup.send(f"⚠️ `{target_id}` already whitelisted!", ephemeral=True)
-            return
-        
-        self.whitelist.add(target_id)
-        if self.save_whitelist():
-            await interaction.followup.send(f"✅ Added `{target_id}`!", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ Save failed!", ephemeral=True)
-    
-    async def whitelist_remove(self, interaction: discord.Interaction, user_input: str):
-        if str(interaction.user.id) != str(OWNER_ID):
-            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        target_id = re.sub(r[<@!>], '', user_input).strip()
-        if not target_id.isdigit():
-            await interaction.followup.send("❌ Invalid user ID!", ephemeral=True)
-            return
-        
-        if target_id == str(OWNER_ID):
-            await interaction.followup.send("⛔ Can't remove owner!", ephemeral=True)
-            return
-        
-        if target_id not in self.whitelist:
-            await interaction.followup.send(f"⚠️ `{target_id}` not in whitelist!", ephemeral=True)
-            return
-        
-        self.whitelist.remove(target_id)
-        if self.save_whitelist():
-            await interaction.followup.send(f"✅ Removed `{target_id}`!", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ Save failed!", ephemeral=True)
-    
-    async def whitelist_list(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != str(OWNER_ID):
-            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        if not self.whitelist:
-            await interaction.followup.send("📋 Empty!", ephemeral=True)
-            return
-        
-        users = []
-        for uid in sorted(self.whitelist):
+            if target_id == str(OWNER_ID):
+                await interaction.followup.send("⛔ Can't remove owner!", ephemeral=True)
+                return
+            
+            self.whitelist.remove(target_id)
+            self.save_whitelist()
+            
+            # Try to get username for better message
             try:
-                user = await self.fetch_user(int(uid))
-                name = user.name if user else "Unknown"
-                users.append(f"• `{uid}` - {name}")
+                user = await self.fetch_user(int(target_id))
+                name = f"@{user.name}" if user else target_id
             except:
-                users.append(f"• `{uid}` - Unknown")
-        
-        embed = discord.Embed(title="📋 Whitelist", description="\n".join(users), color=0x00D4AA)
-        embed.set_footer(text=f"Total: {len(self.whitelist)}")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    
-    async def whitelist_check(self, interaction: discord.Interaction, user_input: str):
-        if str(interaction.user.id) != str(OWNER_ID):
-            await interaction.response.send_message("⛔ Owner only!", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        target_id = re.sub(r[<@!>], '', user_input).strip()
-        is_wl = target_id in self.whitelist
-        status = "✅ Whitelisted" if is_wl else "❌ Not whitelisted"
-        await interaction.followup.send(f"{status} - `{target_id}`", ephemeral=True)
+                name = target_id
+            
+            await interaction.followup.send(f"❌ Removed {name} from whitelist", ephemeral=True)
+        else:
+            self.whitelist.add(target_id)
+            self.save_whitelist()
+            
+            try:
+                user = await self.fetch_user(int(target_id))
+                name = f"@{user.name}" if user else target_id
+            except:
+                name = target_id
+            
+            await interaction.followup.send(f"✅ Added {name} to whitelist", ephemeral=True)
     
     async def do_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str):
         user_id = str(interaction.user.id)
@@ -356,75 +309,125 @@ class Bot(discord.Client):
                 await interaction.followup.send("❌ No text found in image")
                 return
             
-            usernames = []
-            usernames.extend(re.findall(r'@([A-Za-z0-9_]{3,20})\b', text))
-            id_matches = re.findall(r'roblox\.com/users/(\d+)', text, re.IGNORECASE)
+            # IMPROVED OCR: Extract @username and display name, verify they match
+            found_users = self.extract_roblox_users(text)
             
             if hint:
-                hint = hint.strip()
-                if re.match(r'^[A-Za-z0-9_]{3,20}$', hint):
-                    usernames.insert(0, hint)
+                hint = hint.strip().lower().replace('@', '')
+                # Add hint to search if valid
+                if re.match(r'^[a-z0-9_]{3,20}$', hint):
+                    found_users.insert(0, {'username': hint, 'display': None, 'confidence': 'hint'})
             
-            if not usernames and not id_matches:
+            if not found_users:
                 preview = text[:300].replace('\n', ' ')
                 await interaction.followup.send(f"❌ No username found. OCR saw: ```{preview}...```")
                 return
             
-            user_info = None
+            # Try to resolve each found user and verify display name matches
+            verified_user = None
+            all_tried = []
             
-            if id_matches:
+            for user_data in found_users[:5]:  # Try top 5 matches
+                username = user_data['username']
+                display_name = user_data.get('display')
+                all_tried.append(username)
+                
                 try:
-                    uid = int(id_matches[0])
-                    async with self.session.get(f'https://users.roblox.com/v1/users/{uid}', timeout=10) as resp:
-                        if resp.status == 200:
-                            user_info = await resp.json()
+                    # Get user by username
+                    async with self.session.post(
+                        'https://users.roblox.com/v1/usernames/users',
+                        json={"usernames": [username], "excludeBannedUsers": False},
+                        timeout=10
+                    ) as resp:
+                        data = await resp.json()
+                        
+                        if not data.get('data') or len(data['data']) == 0:
+                            continue
+                        
+                        user_info = data['data'][0]
+                        uid = user_info['id']
+                        
+                        # Get full profile
+                        async with self.session.get(f'https://users.roblox.com/v1/users/{uid}', timeout=10) as resp:
+                            if resp.status != 200:
+                                continue
+                            profile = await resp.json()
+                        
+                        # VERIFICATION: Check if display name from OCR matches profile
+                        profile_display = profile.get('displayName', '')
+                        
+                        # If we found a display name in OCR, verify it matches
+                        if display_name and display_name.lower() != profile_display.lower():
+                            # Partial match or close match is OK
+                            similarity = self.name_similarity(display_name.lower(), profile_display.lower())
+                            if similarity < 0.5:  # Less than 50% similar
+                                print(f"Display name mismatch: OCR='{display_name}' vs Profile='{profile_display}'")
+                                # Still use it but note the mismatch
+                        
+                        # If hint provided, prioritize exact match
+                        if hint and username.lower() == hint:
+                            verified_user = profile
+                            verified_user['matched_by'] = 'hint'
+                            break
+                        
+                        # Prioritize users where display name matches @username context
+                        if display_name and (display_name.lower() in text.lower()):
+                            verified_user = profile
+                            verified_user['matched_by'] = 'display_match'
+                            break
+                        
+                        # Otherwise take first valid
+                        if not verified_user:
+                            verified_user = profile
+                            verified_user['matched_by'] = 'username_only'
+                            
                 except Exception as e:
-                    print(f"ID lookup error: {e}")
+                    print(f"Lookup error for {username}: {e}")
+                    continue
             
-            if not user_info and usernames:
-                for username in usernames[:3]:
-                    try:
-                        async with self.session.post(
-                            'https://users.roblox.com/v1/usernames/users',
-                            json={"usernames": [username], "excludeBannedUsers": False},
-                            timeout=10
-                        ) as resp:
-                            data = await resp.json()
-                            if data.get('data') and len(data['data']) > 0:
-                                user_data = data['data'][0]
-                                async with self.session.get(f'https://users.roblox.com/v1/users/{user_data["id"]}', timeout=10) as resp:
-                                    if resp.status == 200:
-                                        user_info = await resp.json()
-                                        break
-                    except Exception as e:
-                        print(f"Username lookup error for {username}: {e}")
-                        continue
-            
-            if not user_info:
-                tried = ', '.join(usernames[:5]) if usernames else f"ID:{id_matches[0]}" if id_matches else "none"
-                await interaction.followup.send(f"❌ Could not resolve user. Tried: `{tried}`")
+            if not verified_user:
+                await interaction.followup.send(f"❌ Could not verify any user. Tried: `{', '.join(all_tried[:5])}`")
                 return
             
-            color = 0xFF0000 if user_info.get('isBanned') else 0x00D4AA
+            # Build enhanced embed with verification info
+            color = 0xFF0000 if verified_user.get('isBanned') else 0x00D4AA
+            
+            # Determine verification status
+            match_type = verified_user.get('matched_by', 'unknown')
+            if match_type == 'hint':
+                verify_emoji = '🎯'
+                verify_text = 'Exact match (hint)'
+            elif match_type == 'display_match':
+                verify_emoji = '✅'
+                verify_text = 'Display name verified'
+            else:
+                verify_emoji = '🔍'
+                verify_text = 'Username match'
             
             embed = discord.Embed(
-                title=user_info.get('displayName') or user_info['name'],
-                description=f"@{user_info['name']}",
-                url=f'https://roblox.com/users/{user_info["id"]}/profile',
+                title=f"{verified_user.get('displayName') or verified_user['name']} {verify_emoji}",
+                description=f"@{verified_user['name']}\n`{verify_text}`",
+                url=f'https://roblox.com/users/{verified_user["id"]}/profile',
                 color=color,
                 timestamp=datetime.now()
             )
             
-            embed.add_field(name="🆔 User ID", value=f"`{user_info['id']}`", inline=True)
-            embed.add_field(name="📅 Created", value=str(user_info.get('created', 'Unknown'))[:10], inline=True)
-            embed.add_field(name="⚡ Status", value="🔴 Banned" if user_info.get('isBanned') else "✅ Active", inline=True)
+            embed.add_field(name="🆔 User ID", value=f"`{verified_user['id']}`", inline=True)
+            embed.add_field(name="📅 Created", value=str(verified_user.get('created', 'Unknown'))[:10], inline=True)
+            embed.add_field(name="⚡ Status", value="🔴 Banned" if verified_user.get('isBanned') else "✅ Active", inline=True)
             
-            if user_info.get('description'):
-                desc = user_info['description'][:200] + "..." if len(user_info['description']) > 200 else user_info['description']
+            if verified_user.get('description'):
+                desc = verified_user['description'][:200] + "..." if len(verified_user['description']) > 200 else verified_user['description']
                 embed.add_field(name="📝 About", value=desc, inline=False)
             
+            # Show other candidates if multiple found
+            if len(found_users) > 1:
+                other_names = [u['username'] for u in found_users[1:3] if u['username'] != verified_user['name']]
+                if other_names:
+                    embed.add_field(name="🔍 Also detected", value=', '.join(f'`@{n}`' for n in other_names), inline=False)
+            
             embed.set_image(url=image.url)
-            embed.set_footer(text="TRUE OMEGA | Railway Deployment")
+            embed.set_footer(text="TRUE OMEGA | Verified Scanner")
             
             await interaction.followup.send(embed=embed)
             
@@ -435,6 +438,72 @@ class Bot(discord.Client):
             traceback.print_exc()
             await interaction.followup.send(f"❌ Error: {str(e)[:200]}")
     
+    def extract_roblox_users(self, text: str) -> list:
+        """Extract potential Roblox usernames with display names from OCR text"""
+        users = []
+        lines = text.split('\n')
+        
+        # Pattern 1: Look for @username followed by display name on same or next line
+        for i, line in enumerate(lines):
+            # Find @username
+            at_matches = re.findall(r'@([A-Za-z0-9_]{3,20})\b', line)
+            
+            for username in at_matches:
+                user_data = {'username': username, 'display': None, 'confidence': 'medium'}
+                
+                # Look for display name nearby (same line before @ or next line)
+                # Display names often appear before @username or on same line
+                line_before_at = line.split('@')[0].strip()
+                if line_before_at and len(line_before_at) > 2:
+                    # Clean up common OCR artifacts
+                    display = re.sub(r'[^\w\s]', '', line_before_at).strip()
+                    if display:
+                        user_data['display'] = display
+                
+                # If no display found on same line, check next line
+                if not user_data['display'] and i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    # If next line doesn't contain @, it might be the display name
+                    if '@' not in next_line and len(next_line) < 30:
+                        user_data['display'] = next_line
+                
+                users.append(user_data)
+        
+        # Pattern 2: roblox.com/users/ID
+        id_matches = re.findall(r'roblox\.com/users/(\d+)', text, re.IGNORECASE)
+        for uid in id_matches:
+            users.insert(0, {'username': f'ID:{uid}', 'id': uid, 'confidence': 'high'})
+        
+        # Pattern 3: Standalone usernames (if they look like Roblox names)
+        # Look for words that could be usernames in context
+        all_words = re.findall(r'\b[A-Za-z0-9_]{3,20}\b', text)
+        for word in all_words:
+            # Skip common words
+            if word.lower() not in ['the', 'and', 'for', 'you', 'roblox', 'profile', 'home', 'games']:
+                if not any(u['username'].lower() == word.lower() for u in users):
+                    users.append({'username': word, 'display': None, 'confidence': 'low'})
+        
+        # Sort by confidence
+        confidence_order = {'high': 0, 'hint': 1, 'medium': 2, 'low': 3}
+        users.sort(key=lambda x: confidence_order.get(x.get('confidence', 'low'), 4))
+        
+        return users
+    
+    def name_similarity(self, s1: str, s2: str) -> float:
+        """Calculate simple similarity between two strings"""
+        if s1 == s2:
+            return 1.0
+        if not s1 or not s2:
+            return 0.0
+        
+        # Simple character-based similarity
+        set1 = set(s1)
+        set2 = set(s2)
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+        
+        return intersection / union if union > 0 else 0.0
+    
     async def do_download(self, interaction: discord.Interaction, url: str):
         user_id = str(interaction.user.id)
         
@@ -442,16 +511,10 @@ class Bot(discord.Client):
             await interaction.response.send_message("⛔ Not whitelisted", ephemeral=True)
             return
         
-        if not url.startswith(('http://', 'https://')):
-            await interaction.response.send_message("❌ Invalid URL", ephemeral=True)
-            return
-        
-        supported = ['youtube', 'youtu.be', 'tiktok', 'instagram', 'twitter', 'x.com', 'reddit', 'streamable', 'medal.tv', 'medal']
-        if not any(site in url.lower() for site in supported):
-            await interaction.response.send_message(
-                "❌ Unsupported site. Supported: YouTube, TikTok, Instagram, Twitter/X, Reddit, Streamable, Medal.tv",
-                ephemeral=True
-            )
+        # Basic URL validation
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            await interaction.response.send_message("❌ Invalid URL format", ephemeral=True)
             return
         
         await interaction.response.defer(thinking=True)
@@ -460,28 +523,40 @@ class Bot(discord.Client):
             result = await self.downloader.download(url, str(interaction.user.id))
             
             if not result['success']:
-                await interaction.followup.send(f"❌ Download failed: {result['error']}")
+                error = result['error']
+                # User-friendly error messages
+                if 'format' in error.lower():
+                    await interaction.followup.send(f"❌ This video format isn't supported. Try a different URL.\nError: `{error[:100]}`")
+                elif 'unavailable' in error.lower():
+                    await interaction.followup.send(f"❌ Video unavailable. Check if it's private or deleted.")
+                else:
+                    await interaction.followup.send(f"❌ Download failed: `{error[:150]}`")
                 return
             
             size_mb = result['size'] / (1024 * 1024)
             
             if result['size'] > 25 * 1024 * 1024:
-                await interaction.followup.send(f"⚠️ File too large ({size_mb:.1f}MB). Max is 25MB.")
+                await interaction.followup.send(f"⚠️ File too large ({size_mb:.1f}MB). Max is 25MB for Discord.")
                 self.downloader.cleanup(result['file_path'])
                 return
             
-            safe_title = re.sub(r'[^\w\-_.]', '_', result['title'][:40])
-            filename = f"{safe_title}.mp4"
+            # Ensure filename ends with .mp4
+            safe_title = re.sub(r'[^\w\-_.]', '_', result['title'][:50])
+            if not safe_title.endswith('.mp4'):
+                filename = f"{safe_title}.mp4"
+            else:
+                filename = safe_title
             
             file = discord.File(result['file_path'], filename=filename)
             
             embed = discord.Embed(
-                title="📥 Download Complete",
+                title="⚡ Download Complete",
                 description=f"**{result['title'][:100]}**",
                 color=0x00D4AA
             )
             embed.add_field(name="📦 Size", value=f"{size_mb:.1f}MB", inline=True)
-            embed.set_footer(text="TRUE OMEGA | Railway")
+            embed.add_field(name="📹 Format", value="MP4", inline=True)
+            embed.set_footer(text="TRUE OMEGA | Universal Downloader")
             
             await interaction.followup.send(embed=embed, file=file)
             self.downloader.cleanup(result['file_path'])
