@@ -1,6 +1,4 @@
-"""
-🎯 TRUE OMEGA - RAILWAY VERSION
-"""
+""" 🎯 TRUE OMEGA - RAILWAY VERSION """
 import os
 import sys
 import asyncio
@@ -20,7 +18,9 @@ warnings.filterwarnings('ignore')
 # Config - USE ENVIRONMENT VARIABLES (Railway way)
 OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
 OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', 'K88183322888957')
-TOKEN = os.getenv('MTQ2NzE4MjgyNzI4NzIyMDI4Nw.GCFpwD.sTR2ILzAzwhuyrjO6hu7JBw7qJhHBOLqHoe7_0')
+
+# FIXED: Use DISCORD_TOKEN (matches your Railway variable name)
+TOKEN = os.getenv('DISCORD_TOKEN')
 
 if not TOKEN:
     print("❌ ERROR: DISCORD_TOKEN environment variable not set!")
@@ -87,6 +87,7 @@ class VideoDownloader:
                     "title": result.get('title', 'video') if isinstance(result, dict) else 'video',
                     "size": os.path.getsize(actual),
                 }
+                
         except Exception as e:
             return {"success": False, "error": str(e)[:100]}
         
@@ -119,7 +120,7 @@ class Bot(discord.Client):
                 with open('whitelist.json', 'r') as f:
                     data = json.load(f)
                     self.whitelist.update(str(u) for u in data.get('users', []))
-                    print(f"✅ Loaded {len(self.whitelist)} whitelisted users")
+                print(f"✅ Loaded {len(self.whitelist)} whitelisted users")
             else:
                 # Create default whitelist
                 default_whitelist = {"users": [str(OWNER_ID)]}
@@ -154,6 +155,7 @@ class Bot(discord.Client):
     
     async def do_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str):
         user_id = str(interaction.user.id)
+        
         if user_id not in self.whitelist:
             await interaction.response.send_message("⛔ Not whitelisted", ephemeral=True)
             return
@@ -188,7 +190,8 @@ class Bot(discord.Client):
             
             async with self.session.post('https://api.ocr.space/parse/image', data=data, timeout=45) as resp:
                 result = await resp.json()
-                text = result.get('ParsedResults', [{}])[0].get('ParsedText', '')
+            
+            text = result.get('ParsedResults', [{}])[0].get('ParsedText', '')
             
             if not text:
                 await interaction.followup.send("❌ No text found in image")
@@ -266,6 +269,7 @@ class Bot(discord.Client):
                 color=color,
                 timestamp=datetime.now()
             )
+            
             embed.add_field(name="🆔 User ID", value=f"`{user_info['id']}`", inline=True)
             embed.add_field(name="📅 Created", value=str(user_info.get('created', 'Unknown'))[:10], inline=True)
             embed.add_field(name="⚡ Status", value="🔴 Banned" if user_info.get('isBanned') else "✅ Active", inline=True)
@@ -288,6 +292,7 @@ class Bot(discord.Client):
     
     async def do_download(self, interaction: discord.Interaction, url: str):
         user_id = str(interaction.user.id)
+        
         if user_id not in self.whitelist:
             await interaction.response.send_message("⛔ Not whitelisted", ephemeral=True)
             return
@@ -297,8 +302,7 @@ class Bot(discord.Client):
             return
         
         # Check supported sites
-        supported = ['youtube', 'youtu.be', 'tiktok', 'instagram', 'twitter', 'x.com', 
-                     'reddit', 'streamable', 'medal.tv']
+        supported = ['youtube', 'youtu.be', 'tiktok', 'instagram', 'twitter', 'x.com', 'reddit', 'streamable', 'medal.tv']
         if not any(site in url.lower() for site in supported):
             await interaction.response.send_message(
                 "❌ Unsupported site. Supported: YouTube, TikTok, Instagram, Twitter/X, Reddit, Streamable, Medal.tv",
@@ -366,5 +370,4 @@ def main():
             time.sleep(10)
 
 if __name__ == "__main__":
-
     main()
