@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 # Config - USE ENVIRONMENT VARIABLES (Railway way)
 OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
 OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', 'K88183322888957')
-TOKEN = os.getenv('DISCORD_TOKEN')
+TOKEN = os.getenv('MTQ2NzE4MjgyNzI4NzIyMDI4Nw.GCFpwD.sTR2ILzAzwhuyrjO6hu7JBw7qJhHBOLqHoe7_0')
 
 if not TOKEN:
     print("❌ ERROR: DISCORD_TOKEN environment variable not set!")
@@ -366,4 +366,5 @@ def main():
             time.sleep(10)
 
 if __name__ == "__main__":
+
     main()
