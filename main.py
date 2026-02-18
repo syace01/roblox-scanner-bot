@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 warnings.filterwarnings('ignore')
 
-# Config - USE ENVIRONMENT VARIABLES (Railway way)
+# Config - USE ENVIRONMENT VARIABLES ONLY (Railway way)
 OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
 OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', '')
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -64,7 +64,6 @@ class UniversalDownloader:
             loop = asyncio.get_event_loop()
             
             def dl():
-                # Universal options that work with ANY site
                 ydl_opts = {
                     'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                     'outtmpl': output_template,
@@ -76,22 +75,17 @@ class UniversalDownloader:
                         'key': 'FFmpegVideoConvertor',
                         'preferedformat': 'mp4',
                     }],
-                    # Bypass restrictions
                     'geo_bypass': True,
                     'nocheckcertificate': True,
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0',
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.0',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'Accept-Language': 'en-us,en;q=0.5',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     },
                 }
                 
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=True)
-                        
-                        # Find the downloaded file
                         downloaded_files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
                         
                         if not downloaded_files:
@@ -100,22 +94,18 @@ class UniversalDownloader:
                         actual_file = os.path.join(self.path, downloaded_files[0])
                         file_size = os.path.getsize(actual_file)
                         
-                        # If not mp4, try to convert or rename
                         if not actual_file.endswith('.mp4'):
                             mp4_file = actual_file.rsplit('.', 1)[0] + '.mp4'
-                            if os.path.exists(actual_file):
-                                # Try ffmpeg convert if available
-                                try:
-                                    subprocess.run(['ffmpeg', '-i', actual_file, '-c', 'copy', mp4_file, '-y'], 
-                                                 capture_output=True, timeout=30)
-                                    if os.path.exists(mp4_file):
-                                        os.remove(actual_file)
-                                        actual_file = mp4_file
-                                        file_size = os.path.getsize(actual_file)
-                                except:
-                                    # Just rename if ffmpeg not available
-                                    os.rename(actual_file, mp4_file)
+                            try:
+                                subprocess.run(['ffmpeg', '-i', actual_file, '-c', 'copy', mp4_file, '-y'], 
+                                             capture_output=True, timeout=30)
+                                if os.path.exists(mp4_file):
+                                    os.remove(actual_file)
                                     actual_file = mp4_file
+                                    file_size = os.path.getsize(actual_file)
+                            except:
+                                os.rename(actual_file, mp4_file)
+                                actual_file = mp4_file
                         
                         return {
                             "success": True,
@@ -126,7 +116,6 @@ class UniversalDownloader:
                         
                 except Exception as e:
                     error_msg = str(e)
-                    # If format error, try with no format specified
                     if 'format' in error_msg.lower():
                         ydl_opts['format'] = None
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
@@ -179,7 +168,6 @@ class Bot(discord.Client):
     async def setup_hook(self):
         print("🔧 Setting up bot...")
         
-        # Load whitelist
         try:
             if os.path.exists(self.whitelist_file):
                 with open(self.whitelist_file, 'r') as f:
@@ -195,7 +183,6 @@ class Bot(discord.Client):
         self.session = aiohttp.ClientSession()
         self.downloader = UniversalDownloader()
         
-        # Register commands
         @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
         @app_commands.describe(image="Screenshot to scan", hint="Optional username hint")
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
@@ -206,17 +193,13 @@ class Bot(discord.Client):
         async def download(interaction: discord.Interaction, url: str):
             await self.do_download(interaction, url)
         
-        # Simple whitelist command
         @self.tree.command(name="whitelist", description="⚙️ Add/Remove user from whitelist (Owner only)")
         @app_commands.describe(user="User to whitelist/unwhitelist (@mention or ID)")
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
             await self.do_whitelist(interaction, user)
         
-        # Force clear old commands and sync fresh
         try:
-            # Clear all commands first to avoid conflicts
             self.tree.clear_commands(guild=None)
-            # Now sync fresh
             synced = await self.tree.sync()
             print(f"✅ Synced {len(synced)} commands globally:")
             for cmd in synced:
@@ -228,21 +211,18 @@ class Bot(discord.Client):
         print("✅ Bot setup complete!")
     
     async def do_whitelist(self, interaction: discord.Interaction, user_input: str):
-        """Simple whitelist toggle - add if not exists, remove if exists"""
         if str(interaction.user.id) != str(OWNER_ID):
             await interaction.response.send_message("⛔ Only owner can use this!", ephemeral=True)
             return
         
         await interaction.response.defer(ephemeral=True)
         
-        # Extract ID from mention or use as-is
         target_id = re.sub(r[<@!>], '', user_input).strip()
         
         if not target_id.isdigit():
             await interaction.followup.send("❌ Invalid user ID! Use @mention or ID", ephemeral=True)
             return
         
-        # Toggle: remove if exists, add if not
         if target_id in self.whitelist:
             if target_id == str(OWNER_ID):
                 await interaction.followup.send("⛔ Can't remove owner!", ephemeral=True)
@@ -251,7 +231,6 @@ class Bot(discord.Client):
             self.whitelist.remove(target_id)
             self.save_whitelist()
             
-            # Try to get username for better message
             try:
                 user = await self.fetch_user(int(target_id))
                 name = f"@{user.name}" if user else target_id
@@ -312,12 +291,10 @@ class Bot(discord.Client):
                 await interaction.followup.send("❌ No text found in image")
                 return
             
-            # IMPROVED OCR: Extract @username and display name, verify they match
             found_users = self.extract_roblox_users(text)
             
             if hint:
                 hint = hint.strip().lower().replace('@', '')
-                # Add hint to search if valid
                 if re.match(r'^[a-z0-9_]{3,20}$', hint):
                     found_users.insert(0, {'username': hint, 'display': None, 'confidence': 'hint'})
             
@@ -326,17 +303,15 @@ class Bot(discord.Client):
                 await interaction.followup.send(f"❌ No username found. OCR saw: ```{preview}...```")
                 return
             
-            # Try to resolve each found user and verify display name matches
             verified_user = None
             all_tried = []
             
-            for user_data in found_users[:5]:  # Try top 5 matches
+            for user_data in found_users[:5]:
                 username = user_data['username']
                 display_name = user_data.get('display')
                 all_tried.append(username)
                 
                 try:
-                    # Get user by username
                     async with self.session.post(
                         'https://users.roblox.com/v1/usernames/users',
                         json={"usernames": [username], "excludeBannedUsers": False},
@@ -350,36 +325,23 @@ class Bot(discord.Client):
                         user_info = data['data'][0]
                         uid = user_info['id']
                         
-                        # Get full profile
                         async with self.session.get(f'https://users.roblox.com/v1/users/{uid}', timeout=10) as resp:
                             if resp.status != 200:
                                 continue
                             profile = await resp.json()
                         
-                        # VERIFICATION: Check if display name from OCR matches profile
                         profile_display = profile.get('displayName', '')
                         
-                        # If we found a display name in OCR, verify it matches
-                        if display_name and display_name.lower() != profile_display.lower():
-                            # Partial match or close match is OK
-                            similarity = self.name_similarity(display_name.lower(), profile_display.lower())
-                            if similarity < 0.5:  # Less than 50% similar
-                                print(f"Display name mismatch: OCR='{display_name}' vs Profile='{profile_display}'")
-                                # Still use it but note the mismatch
-                        
-                        # If hint provided, prioritize exact match
                         if hint and username.lower() == hint:
                             verified_user = profile
                             verified_user['matched_by'] = 'hint'
                             break
                         
-                        # Prioritize users where display name matches @username context
                         if display_name and (display_name.lower() in text.lower()):
                             verified_user = profile
                             verified_user['matched_by'] = 'display_match'
                             break
                         
-                        # Otherwise take first valid
                         if not verified_user:
                             verified_user = profile
                             verified_user['matched_by'] = 'username_only'
@@ -392,10 +354,8 @@ class Bot(discord.Client):
                 await interaction.followup.send(f"❌ Could not verify any user. Tried: `{', '.join(all_tried[:5])}`")
                 return
             
-            # Build enhanced embed with verification info
             color = 0xFF0000 if verified_user.get('isBanned') else 0x00D4AA
             
-            # Determine verification status
             match_type = verified_user.get('matched_by', 'unknown')
             if match_type == 'hint':
                 verify_emoji = '🎯'
@@ -423,7 +383,6 @@ class Bot(discord.Client):
                 desc = verified_user['description'][:200] + "..." if len(verified_user['description']) > 200 else verified_user['description']
                 embed.add_field(name="📝 About", value=desc, inline=False)
             
-            # Show other candidates if multiple found
             if len(found_users) > 1:
                 other_names = [u['username'] for u in found_users[1:3] if u['username'] != verified_user['name']]
                 if other_names:
@@ -442,64 +401,49 @@ class Bot(discord.Client):
             await interaction.followup.send(f"❌ Error: {str(e)[:200]}")
     
     def extract_roblox_users(self, text: str) -> list:
-        """Extract potential Roblox usernames with display names from OCR text"""
         users = []
         lines = text.split('\n')
         
-        # Pattern 1: Look for @username followed by display name on same or next line
         for i, line in enumerate(lines):
-            # Find @username
             at_matches = re.findall(r'@([A-Za-z0-9_]{3,20})\b', line)
             
             for username in at_matches:
                 user_data = {'username': username, 'display': None, 'confidence': 'medium'}
                 
-                # Look for display name nearby (same line before @ or next line)
-                # Display names often appear before @username or on same line
                 line_before_at = line.split('@')[0].strip()
                 if line_before_at and len(line_before_at) > 2:
-                    # Clean up common OCR artifacts
                     display = re.sub(r'[^\w\s]', '', line_before_at).strip()
                     if display:
                         user_data['display'] = display
                 
-                # If no display found on same line, check next line
                 if not user_data['display'] and i + 1 < len(lines):
                     next_line = lines[i + 1].strip()
-                    # If next line doesn't contain @, it might be the display name
                     if '@' not in next_line and len(next_line) < 30:
                         user_data['display'] = next_line
                 
                 users.append(user_data)
         
-        # Pattern 2: roblox.com/users/ID
         id_matches = re.findall(r'roblox\.com/users/(\d+)', text, re.IGNORECASE)
         for uid in id_matches:
             users.insert(0, {'username': f'ID:{uid}', 'id': uid, 'confidence': 'high'})
         
-        # Pattern 3: Standalone usernames (if they look like Roblox names)
-        # Look for words that could be usernames in context
         all_words = re.findall(r'\b[A-Za-z0-9_]{3,20}\b', text)
         for word in all_words:
-            # Skip common words
             if word.lower() not in ['the', 'and', 'for', 'you', 'roblox', 'profile', 'home', 'games']:
                 if not any(u['username'].lower() == word.lower() for u in users):
                     users.append({'username': word, 'display': None, 'confidence': 'low'})
         
-        # Sort by confidence
         confidence_order = {'high': 0, 'hint': 1, 'medium': 2, 'low': 3}
         users.sort(key=lambda x: confidence_order.get(x.get('confidence', 'low'), 4))
         
         return users
     
     def name_similarity(self, s1: str, s2: str) -> float:
-        """Calculate simple similarity between two strings"""
         if s1 == s2:
             return 1.0
         if not s1 or not s2:
             return 0.0
         
-        # Simple character-based similarity
         set1 = set(s1)
         set2 = set(s2)
         intersection = len(set1.intersection(set2))
@@ -514,7 +458,6 @@ class Bot(discord.Client):
             await interaction.response.send_message("⛔ Not whitelisted", ephemeral=True)
             return
         
-        # Basic URL validation
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             await interaction.response.send_message("❌ Invalid URL format", ephemeral=True)
@@ -527,9 +470,8 @@ class Bot(discord.Client):
             
             if not result['success']:
                 error = result['error']
-                # User-friendly error messages
                 if 'format' in error.lower():
-                    await interaction.followup.send(f"❌ This video format isn't supported. Try a different URL.\nError: `{error[:100]}`")
+                    await interaction.followup.send(f"❌ This video format isn't supported.\nError: `{error[:100]}`")
                 elif 'unavailable' in error.lower():
                     await interaction.followup.send(f"❌ Video unavailable. Check if it's private or deleted.")
                 else:
@@ -543,12 +485,8 @@ class Bot(discord.Client):
                 self.downloader.cleanup(result['file_path'])
                 return
             
-            # Ensure filename ends with .mp4
             safe_title = re.sub(r'[^\w\-_.]', '_', result['title'][:50])
-            if not safe_title.endswith('.mp4'):
-                filename = f"{safe_title}.mp4"
-            else:
-                filename = safe_title
+            filename = f"{safe_title}.mp4" if not safe_title.endswith('.mp4') else safe_title
             
             file = discord.File(result['file_path'], filename=filename)
             
