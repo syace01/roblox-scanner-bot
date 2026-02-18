@@ -17,9 +17,7 @@ warnings.filterwarnings('ignore')
 
 # Config - USE ENVIRONMENT VARIABLES (Railway way)
 OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
-OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', 'K88183322888957')
-
-# FIXED: Use DISCORD_TOKEN (matches your Railway variable name)
+OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', '')
 TOKEN = os.getenv('DISCORD_TOKEN')
 
 if not TOKEN:
@@ -59,18 +57,28 @@ class VideoDownloader:
             return {"success": False, "error": "yt-dlp not installed"}
         
         dl_id = f"{user_id}_{int(time.time())}"
-        output = os.path.join(self.path, f"{dl_id}.mp4")
+        output = os.path.join(self.path, f"{dl_id}.%(ext)s")
         
         try:
             loop = asyncio.get_event_loop()
             
             def dl():
+                # FIXED: Better format selection for Medal.tv and others
                 ydl_opts = {
-                    'format': 'best[ext=mp4][filesize<25M]/best[filesize<25M]',
+                    'format': 'best[filesize<25M]/bestvideo[filesize<25M]+bestaudio[filesize<25M]/best[filesize<25M]/worst',
                     'outtmpl': output,
                     'quiet': True,
                     'no_warnings': True,
                     'max_filesize': 25 * 1024 * 1024,
+                    'merge_output_format': 'mp4',
+                    'postprocessors': [{
+                        'key': 'FFmpegVideoConvertor',
+                        'preferedformat': 'mp4',
+                    }],
+                    # Add headers to avoid blocking
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0'
+                    }
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
@@ -78,6 +86,7 @@ class VideoDownloader:
             
             result = await asyncio.wait_for(loop.run_in_executor(None, dl), timeout=120)
             
+            # Find the downloaded file
             files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
             if files:
                 actual = os.path.join(self.path, files[0])
@@ -87,11 +96,11 @@ class VideoDownloader:
                     "title": result.get('title', 'video') if isinstance(result, dict) else 'video',
                     "size": os.path.getsize(actual),
                 }
+            else:
+                return {"success": False, "error": "File not found after download"}
                 
         except Exception as e:
-            return {"success": False, "error": str(e)[:100]}
-        
-        return {"success": False, "error": "Unknown error"}
+            return {"success": False, "error": str(e)[:200]}
     
     def cleanup(self, file_path: str):
         try:
@@ -110,22 +119,30 @@ class Bot(discord.Client):
         self.whitelist = {str(OWNER_ID)}
         self.session = None
         self.downloader = None
+        self.whitelist_file = 'whitelist.json'
+    
+    def save_whitelist(self):
+        """Save whitelist to file"""
+        try:
+            with open(self.whitelist_file, 'w') as f:
+                json.dump({"users": list(self.whitelist)}, f)
+            return True
+        except Exception as e:
+            print(f"❌ Failed to save whitelist: {e}")
+            return False
     
     async def setup_hook(self):
         print("🔧 Setting up bot...")
         
-        # Load whitelist from file or env
+        # Load whitelist from file
         try:
-            if os.path.exists('whitelist.json'):
-                with open('whitelist.json', 'r') as f:
+            if os.path.exists(self.whitelist_file):
+                with open(self.whitelist_file, 'r') as f:
                     data = json.load(f)
                     self.whitelist.update(str(u) for u in data.get('users', []))
                 print(f"✅ Loaded {len(self.whitelist)} whitelisted users")
             else:
-                # Create default whitelist
-                default_whitelist = {"users": [str(OWNER_ID)]}
-                with open('whitelist.json', 'w') as f:
-                    json.dump(default_whitelist, f)
+                self.save_whitelist()
                 print("✅ Created default whitelist.json")
         except Exception as e:
             print(f"⚠️ Whitelist error: {e}")
@@ -144,6 +161,18 @@ class Bot(discord.Client):
         async def download(interaction: discord.Interaction, url: str):
             await self.do_download(interaction, url)
         
+        # NEW: Whitelist command group
+        @self.tree.command(name="whitelist", description="⚙️ Manage whitelisted users (Owner only)")
+        @app_commands.describe(action="Action to perform", user="User to add/remove (ID or mention)")
+        @app_commands.choices(action=[
+            app_commands.Choice(name="add", value="add"),
+            app_commands.Choice(name="remove", value="remove"),
+            app_commands.Choice(name="list", value="list"),
+            app_commands.Choice(name="check", value="check"),
+        ])
+        async def whitelist_cmd(interaction: discord.Interaction, action: app_commands.Choice[str], user: str = None):
+            await self.do_whitelist(interaction, action.value, user)
+        
         # Sync commands globally
         try:
             synced = await self.tree.sync()
@@ -152,6 +181,92 @@ class Bot(discord.Client):
             print(f"⚠️ Command sync error: {e}")
         
         print("✅ Bot setup complete!")
+    
+    async def do_whitelist(self, interaction: discord.Interaction, action: str, user_input: str = None):
+        """Handle whitelist management"""
+        user_id = str(interaction.user.id)
+        
+        # Only owner can manage whitelist
+        if user_id != str(OWNER_ID):
+            await interaction.response.send_message("⛔ Only the bot owner can manage whitelist!", ephemeral=True)
+            return
+        
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        
+        if action == "list":
+            if not self.whitelist:
+                await interaction.followup.send("📋 Whitelist is empty!", ephemeral=True)
+                return
+            
+            users_list = []
+            for uid in sorted(self.whitelist):
+                try:
+                    user = await self.fetch_user(int(uid))
+                    name = f"{user.name}#{user.discriminator}" if user else f"Unknown ({uid})"
+                    users_list.append(f"• `{uid}` - {name}")
+                except:
+                    users_list.append(f"• `{uid}` - Unknown")
+            
+            embed = discord.Embed(
+                title="📋 Whitelisted Users",
+                description="\n".join(users_list) or "None",
+                color=0x00D4AA
+            )
+            embed.set_footer(text=f"Total: {len(self.whitelist)} users")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        if action == "check":
+            if not user_input:
+                await interaction.followup.send("❌ Please provide a user ID to check!", ephemeral=True)
+                return
+            
+            # Extract ID from mention or use as-is
+            check_id = re.sub(r[<@!>], '', user_input).strip()
+            is_whitelisted = check_id in self.whitelist
+            
+            status = "✅ Whitelisted" if is_whitelisted else "❌ Not whitelisted"
+            await interaction.followup.send(f"{status} - `{check_id}`", ephemeral=True)
+            return
+        
+        # Add/Remove need user input
+        if not user_input:
+            await interaction.followup.send("❌ Please provide a user ID!", ephemeral=True)
+            return
+        
+        # Extract ID from mention or use as-is
+        target_id = re.sub(r[<@!>], '', user_input).strip()
+        
+        # Validate ID
+        if not target_id.isdigit():
+            await interaction.followup.send("❌ Invalid user ID! Use the user's ID or mention them.", ephemeral=True)
+            return
+        
+        if action == "add":
+            if target_id in self.whitelist:
+                await interaction.followup.send(f"⚠️ User `{target_id}` is already whitelisted!", ephemeral=True)
+                return
+            
+            self.whitelist.add(target_id)
+            if self.save_whitelist():
+                await interaction.followup.send(f"✅ Added `{target_id}` to whitelist!", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Failed to save whitelist!", ephemeral=True)
+        
+        elif action == "remove":
+            if target_id == str(OWNER_ID):
+                await interaction.followup.send("⛔ Cannot remove the owner!", ephemeral=True)
+                return
+            
+            if target_id not in self.whitelist:
+                await interaction.followup.send(f"⚠️ User `{target_id}` is not in whitelist!", ephemeral=True)
+                return
+            
+            self.whitelist.remove(target_id)
+            if self.save_whitelist():
+                await interaction.followup.send(f"✅ Removed `{target_id}` from whitelist!", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Failed to save whitelist!", ephemeral=True)
     
     async def do_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str):
         user_id = str(interaction.user.id)
@@ -234,7 +349,7 @@ class Bot(discord.Client):
             
             # Try username lookup
             if not user_info and usernames:
-                for username in usernames[:3]:  # Try first 3 found
+                for username in usernames[:3]:
                     try:
                         async with self.session.post(
                             'https://users.roblox.com/v1/usernames/users',
@@ -244,7 +359,6 @@ class Bot(discord.Client):
                             data = await resp.json()
                             if data.get('data') and len(data['data']) > 0:
                                 user_data = data['data'][0]
-                                # Get full profile
                                 async with self.session.get(f'https://users.roblox.com/v1/users/{user_data["id"]}', timeout=10) as resp:
                                     if resp.status == 200:
                                         user_info = await resp.json()
@@ -302,7 +416,7 @@ class Bot(discord.Client):
             return
         
         # Check supported sites
-        supported = ['youtube', 'youtu.be', 'tiktok', 'instagram', 'twitter', 'x.com', 'reddit', 'streamable', 'medal.tv']
+        supported = ['youtube', 'youtu.be', 'tiktok', 'instagram', 'twitter', 'x.com', 'reddit', 'streamable', 'medal.tv', 'medal']
         if not any(site in url.lower() for site in supported):
             await interaction.response.send_message(
                 "❌ Unsupported site. Supported: YouTube, TikTok, Instagram, Twitter/X, Reddit, Streamable, Medal.tv",
