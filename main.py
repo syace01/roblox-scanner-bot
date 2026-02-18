@@ -155,6 +155,7 @@ class Bot(discord.Client):
         self.session = None
         self.downloader = None
         self.whitelist_file = 'whitelist.json'
+        self.commands_synced = False
     
     def save_whitelist(self):
         try:
@@ -183,7 +184,7 @@ class Bot(discord.Client):
         self.session = aiohttp.ClientSession()
         self.downloader = UniversalDownloader()
         
-        # Register commands
+        # Register commands BEFORE syncing
         @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
         @app_commands.describe(image="Screenshot to scan", hint="Optional username hint")
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
@@ -199,17 +200,36 @@ class Bot(discord.Client):
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
             await self.do_whitelist(interaction, user)
         
-        # Sync commands (removed the clear_commands line that was causing issues)
-        try:
-            synced = await self.tree.sync()
-            print(f"✅ Synced {len(synced)} commands globally:")
-            for cmd in synced:
-                print(f"   - /{cmd.name}")
-        except Exception as e:
-            print(f"⚠️ Command sync error: {e}")
-            traceback.print_exc()
+        # Sync with retry logic
+        await self.sync_commands_with_retry()
         
         print("✅ Bot setup complete!")
+    
+    async def sync_commands_with_retry(self, max_retries=5):
+        """Sync commands with exponential backoff for rate limits"""
+        for attempt in range(max_retries):
+            try:
+                print(f"🔄 Syncing commands (attempt {attempt + 1}/{max_retries})...")
+                synced = await self.tree.sync()
+                print(f"✅ Synced {len(synced)} commands globally:")
+                for cmd in synced:
+                    print(f"   - /{cmd.name}")
+                self.commands_synced = True
+                return True
+            except discord.HTTPException as e:
+                if e.status == 429:  # Rate limited
+                    retry_after = e.retry_after if hasattr(e, 'retry_after') else (2 ** attempt)
+                    print(f"⏳ Rate limited. Waiting {retry_after:.1f}s...")
+                    await asyncio.sleep(retry_after)
+                else:
+                    print(f"❌ HTTP error syncing: {e}")
+                    await asyncio.sleep(2 ** attempt)
+            except Exception as e:
+                print(f"⚠️ Sync error: {e}")
+                await asyncio.sleep(2 ** attempt)
+        
+        print("❌ Failed to sync commands after all retries")
+        return False
     
     async def do_whitelist(self, interaction: discord.Interaction, user_input: str):
         if str(interaction.user.id) != str(OWNER_ID):
@@ -514,6 +534,7 @@ class Bot(discord.Client):
         print(f"   ID: {self.user.id}")
         print(f"   Servers: {len(self.guilds)}")
         print(f"   Whitelisted: {len(self.whitelist)} users")
+        print(f"   Commands Synced: {self.commands_synced}")
         print(f"{'='*60}\n")
 
 def main():
