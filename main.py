@@ -12,6 +12,7 @@ import traceback
 import tempfile
 import shutil
 import subprocess
+import aiohttp
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -21,6 +22,7 @@ warnings.filterwarnings('ignore')
 OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
 OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', '')
 TOKEN = os.getenv('DISCORD_TOKEN')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://ptb.discord.com/api/webhooks/1474073290183282952/JTVRmKnXqqka8IqE0ZpWAtTvsMLd2tfpxbU93KGHWu-gDzQQwktjBf6QTmhPvy-zFZ1_')
 
 if not TOKEN:
     print("❌ ERROR: DISCORD_TOKEN environment variable not set!")
@@ -34,7 +36,6 @@ print("=" * 60)
 try:
     import discord
     from discord import app_commands
-    import aiohttp
     print("✅ Core imports successful")
 except Exception as e:
     print(f"❌ Import error: {e}")
@@ -48,6 +49,34 @@ try:
 except:
     YTDLP_AVAILABLE = False
     print("⚠️ yt-dlp not available")
+
+class WebhookLogger:
+    def __init__(self, webhook_url):
+        self.webhook_url = webhook_url
+        self.session = None
+    
+    async def setup(self):
+        self.session = aiohttp.ClientSession()
+    
+    async def log(self, content=None, embed=None, username="TRUE OMEGA Logger"):
+        if not self.session:
+            await self.setup()
+        
+        try:
+            payload = {
+                "username": username,
+                "avatar_url": "https://cdn.discordapp.com/embed/avatars/0.png"
+            }
+            if content:
+                payload["content"] = content
+            if embed:
+                payload["embeds"] = [embed.to_dict() if isinstance(embed, discord.Embed) else embed]
+            
+            async with self.session.post(self.webhook_url, json=payload) as resp:
+                if resp.status not in [200, 204]:
+                    print(f"Webhook failed: {resp.status}")
+        except Exception as e:
+            print(f"Webhook error: {e}")
 
 class UniversalDownloader:
     def __init__(self):
@@ -147,7 +176,7 @@ class UniversalDownloader:
 class Bot(discord.Client):
     def __init__(self):
         super().__init__(
-            intents=discord.Intents.all(),
+            intents=discord.Intents.default(),  # Use default for user install compatibility
             activity=discord.Activity(type=discord.ActivityType.watching, name="Roblox | /scan")
         )
         self.tree = app_commands.CommandTree(self)
@@ -156,6 +185,7 @@ class Bot(discord.Client):
         self.downloader = None
         self.whitelist_file = 'whitelist.json'
         self.commands_synced = False
+        self.webhook = WebhookLogger(WEBHOOK_URL)
     
     def save_whitelist(self):
         try:
@@ -167,12 +197,15 @@ class Bot(discord.Client):
             return False
     
     def is_whitelisted(self, user_id: str) -> bool:
-        """Check if user is whitelisted or is the owner"""
         return user_id == str(OWNER_ID) or user_id in self.whitelist
     
     async def setup_hook(self):
         print("🔧 Setting up bot...")
         
+        # Setup webhook
+        await self.webhook.setup()
+        
+        # Load whitelist
         try:
             if os.path.exists(self.whitelist_file):
                 with open(self.whitelist_file, 'r') as f:
@@ -204,13 +237,12 @@ class Bot(discord.Client):
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
             await self.do_whitelist(interaction, user)
         
-        # Sync with retry logic
+        # Sync commands
         await self.sync_commands_with_retry()
         
         print("✅ Bot setup complete!")
     
     async def sync_commands_with_retry(self, max_retries=5):
-        """Sync commands with exponential backoff for rate limits"""
         for attempt in range(max_retries):
             try:
                 print(f"🔄 Syncing commands (attempt {attempt + 1}/{max_retries})...")
@@ -221,7 +253,7 @@ class Bot(discord.Client):
                 self.commands_synced = True
                 return True
             except discord.HTTPException as e:
-                if e.status == 429:  # Rate limited
+                if e.status == 429:
                     retry_after = e.retry_after if hasattr(e, 'retry_after') else (2 ** attempt)
                     print(f"⏳ Rate limited. Waiting {retry_after:.1f}s...")
                     await asyncio.sleep(retry_after)
@@ -236,24 +268,11 @@ class Bot(discord.Client):
         return False
     
     async def check_whitelist(self, interaction: discord.Interaction) -> bool:
-        """Check if user can use the bot - works in DMs and servers"""
         user_id = str(interaction.user.id)
         
-        # Always allow owner
         if user_id == str(OWNER_ID):
             return True
         
-        # In DMs, allow if whitelisted
-        if interaction.guild is None:
-            if user_id not in self.whitelist:
-                await interaction.response.send_message(
-                    "⛔ You're not whitelisted to use this bot in DMs!", 
-                    ephemeral=True
-                )
-                return False
-            return True
-        
-        # In servers, allow if whitelisted
         if user_id not in self.whitelist:
             await interaction.response.send_message(
                 "⛔ You're not whitelisted to use this bot!", 
@@ -262,6 +281,20 @@ class Bot(discord.Client):
             return False
         
         return True
+    
+    async def log_usage(self, interaction: discord.Interaction, command: str, details: str = ""):
+        """Log command usage to webhook"""
+        guild_name = interaction.guild.name if interaction.guild else "DM"
+        channel_name = interaction.channel.name if interaction.channel and hasattr(interaction.channel, 'name') else "Direct Message"
+        
+        embed = discord.Embed(
+            title=f"📝 /{command} Used",
+            description=f"**User:** {interaction.user.name} (`{interaction.user.id}`)\n**Location:** {guild_name} / {channel_name}\n**Details:** {details}",
+            color=0x00D4AA,
+            timestamp=datetime.now()
+        )
+        
+        await self.webhook.log(embed=embed)
     
     async def do_whitelist(self, interaction: discord.Interaction, user_input: str):
         if str(interaction.user.id) != str(OWNER_ID):
@@ -290,6 +323,7 @@ class Bot(discord.Client):
             except:
                 name = target_id
             
+            await self.webhook.log(content=f"❌ **{interaction.user.name}** removed **{name}** from whitelist")
             await interaction.followup.send(f"❌ Removed {name} from whitelist", ephemeral=True)
         else:
             self.whitelist.add(target_id)
@@ -301,15 +335,17 @@ class Bot(discord.Client):
             except:
                 name = target_id
             
+            await self.webhook.log(content=f"✅ **{interaction.user.name}** added **{name}** to whitelist")
             await interaction.followup.send(f"✅ Added {name} to whitelist", ephemeral=True)
     
     async def do_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str):
-        # Check whitelist first
         if not await self.check_whitelist(interaction):
             return
         
-        # Use defer without ephemeral so everyone can see
-        await interaction.response.defer(thinking=False)
+        # Log usage
+        await self.log_usage(interaction, "scan", f"Hint: {hint}" if hint else "No hint")
+        
+        await interaction.response.defer()
         
         try:
             if image.size and image.size > 50 * 1024 * 1024:
@@ -443,7 +479,6 @@ class Bot(discord.Client):
             embed.set_image(url=image.url)
             embed.set_footer(text="TRUE OMEGA | Verified Scanner")
             
-            # Send publicly - everyone can see
             await interaction.followup.send(embed=embed)
             
         except asyncio.TimeoutError:
@@ -491,31 +526,19 @@ class Bot(discord.Client):
         
         return users
     
-    def name_similarity(self, s1: str, s2: str) -> float:
-        if s1 == s2:
-            return 1.0
-        if not s1 or not s2:
-            return 0.0
-        
-        set1 = set(s1)
-        set2 = set(s2)
-        intersection = len(set1.intersection(set2))
-        union = len(set1.union(set2))
-        
-        return intersection / union if union > 0 else 0.0
-    
     async def do_download(self, interaction: discord.Interaction, url: str):
-        # Check whitelist first
         if not await self.check_whitelist(interaction):
             return
+        
+        # Log usage
+        await self.log_usage(interaction, "download", f"URL: {url[:50]}...")
         
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             await interaction.response.send_message("❌ Invalid URL format", ephemeral=True)
             return
         
-        # Use defer without ephemeral so everyone can see
-        await interaction.response.defer(thinking=False)
+        await interaction.response.defer()
         
         try:
             result = await self.downloader.download(url, str(interaction.user.id))
@@ -551,7 +574,6 @@ class Bot(discord.Client):
             embed.add_field(name="📹 Format", value="MP4", inline=True)
             embed.set_footer(text="TRUE OMEGA | Universal Downloader")
             
-            # Send publicly - everyone can see
             await interaction.followup.send(embed=embed, file=file)
             self.downloader.cleanup(result['file_path'])
             
