@@ -166,6 +166,10 @@ class Bot(discord.Client):
             print(f"❌ Failed to save whitelist: {e}")
             return False
     
+    def is_whitelisted(self, user_id: str) -> bool:
+        """Check if user is whitelisted or is the owner"""
+        return user_id == str(OWNER_ID) or user_id in self.whitelist
+    
     async def setup_hook(self):
         print("🔧 Setting up bot...")
         
@@ -184,7 +188,7 @@ class Bot(discord.Client):
         self.session = aiohttp.ClientSession()
         self.downloader = UniversalDownloader()
         
-        # Register commands BEFORE syncing
+        # Register commands
         @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
         @app_commands.describe(image="Screenshot to scan", hint="Optional username hint")
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
@@ -231,6 +235,34 @@ class Bot(discord.Client):
         print("❌ Failed to sync commands after all retries")
         return False
     
+    async def check_whitelist(self, interaction: discord.Interaction) -> bool:
+        """Check if user can use the bot - works in DMs and servers"""
+        user_id = str(interaction.user.id)
+        
+        # Always allow owner
+        if user_id == str(OWNER_ID):
+            return True
+        
+        # In DMs, allow if whitelisted
+        if interaction.guild is None:
+            if user_id not in self.whitelist:
+                await interaction.response.send_message(
+                    "⛔ You're not whitelisted to use this bot in DMs!", 
+                    ephemeral=True
+                )
+                return False
+            return True
+        
+        # In servers, allow if whitelisted
+        if user_id not in self.whitelist:
+            await interaction.response.send_message(
+                "⛔ You're not whitelisted to use this bot!", 
+                ephemeral=True
+            )
+            return False
+        
+        return True
+    
     async def do_whitelist(self, interaction: discord.Interaction, user_input: str):
         if str(interaction.user.id) != str(OWNER_ID):
             await interaction.response.send_message("⛔ Only owner can use this!", ephemeral=True)
@@ -272,13 +304,12 @@ class Bot(discord.Client):
             await interaction.followup.send(f"✅ Added {name} to whitelist", ephemeral=True)
     
     async def do_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str):
-        user_id = str(interaction.user.id)
-        
-        if user_id not in self.whitelist:
-            await interaction.response.send_message("⛔ Not whitelisted", ephemeral=True)
+        # Check whitelist first
+        if not await self.check_whitelist(interaction):
             return
         
-        await interaction.response.defer(thinking=True)
+        # Use defer without ephemeral so everyone can see
+        await interaction.response.defer(thinking=False)
         
         try:
             if image.size and image.size > 50 * 1024 * 1024:
@@ -412,6 +443,7 @@ class Bot(discord.Client):
             embed.set_image(url=image.url)
             embed.set_footer(text="TRUE OMEGA | Verified Scanner")
             
+            # Send publicly - everyone can see
             await interaction.followup.send(embed=embed)
             
         except asyncio.TimeoutError:
@@ -473,10 +505,8 @@ class Bot(discord.Client):
         return intersection / union if union > 0 else 0.0
     
     async def do_download(self, interaction: discord.Interaction, url: str):
-        user_id = str(interaction.user.id)
-        
-        if user_id not in self.whitelist:
-            await interaction.response.send_message("⛔ Not whitelisted", ephemeral=True)
+        # Check whitelist first
+        if not await self.check_whitelist(interaction):
             return
         
         parsed = urlparse(url)
@@ -484,7 +514,8 @@ class Bot(discord.Client):
             await interaction.response.send_message("❌ Invalid URL format", ephemeral=True)
             return
         
-        await interaction.response.defer(thinking=True)
+        # Use defer without ephemeral so everyone can see
+        await interaction.response.defer(thinking=False)
         
         try:
             result = await self.downloader.download(url, str(interaction.user.id))
@@ -520,6 +551,7 @@ class Bot(discord.Client):
             embed.add_field(name="📹 Format", value="MP4", inline=True)
             embed.set_footer(text="TRUE OMEGA | Universal Downloader")
             
+            # Send publicly - everyone can see
             await interaction.followup.send(embed=embed, file=file)
             self.downloader.cleanup(result['file_path'])
             
