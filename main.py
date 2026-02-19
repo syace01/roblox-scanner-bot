@@ -1,4 +1,4 @@
-""" 🎯 TRUE OMEGA - RAILWAY VERSION """
+""" 🎯 TRUE OMEGA - RAILWAY VERSION (DM FIXED) """
 import os
 import sys
 import asyncio
@@ -175,8 +175,13 @@ class UniversalDownloader:
 
 class Bot(discord.Client):
     def __init__(self):
+        # FIX: Explicitly enable DM messages intent
+        intents = discord.Intents.default()
+        intents.dm_messages = True
+        intents.message_content = True  # Helps with debugging if needed
+        
         super().__init__(
-            intents=discord.Intents.default(),  # Use default for user install compatibility
+            intents=intents,
             activity=discord.Activity(type=discord.ActivityType.watching, name="Roblox | /scan")
         )
         self.tree = app_commands.CommandTree(self)
@@ -221,18 +226,30 @@ class Bot(discord.Client):
         self.session = aiohttp.ClientSession()
         self.downloader = UniversalDownloader()
         
-        # Register commands
-        @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
+        # Register commands with explicit DM permission
+        @self.tree.command(
+            name="scan", 
+            description="🔍 Scan Roblox username from image",
+            extras={"dm_permission": True}  # Explicitly allow DMs
+        )
         @app_commands.describe(image="Screenshot to scan", hint="Optional username hint")
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
             await self.do_scan(interaction, image, hint)
         
-        @self.tree.command(name="download", description="📥 Download any video to MP4")
+        @self.tree.command(
+            name="download", 
+            description="📥 Download any video to MP4",
+            extras={"dm_permission": True}
+        )
         @app_commands.describe(url="Any video URL (YouTube, Medal, Streamable, direct MP4, etc.)")
         async def download(interaction: discord.Interaction, url: str):
             await self.do_download(interaction, url)
         
-        @self.tree.command(name="whitelist", description="⚙️ Add/Remove user from whitelist (Owner only)")
+        @self.tree.command(
+            name="whitelist", 
+            description="⚙️ Add/Remove user from whitelist (Owner only)",
+            extras={"dm_permission": True}
+        )
         @app_commands.describe(user="User to whitelist/unwhitelist (@mention or ID)")
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
             await self.do_whitelist(interaction, user)
@@ -274,34 +291,65 @@ class Bot(discord.Client):
             return True
         
         if user_id not in self.whitelist:
-            await interaction.response.send_message(
-                "⛔ You're not whitelisted to use this bot!", 
-                ephemeral=True
-            )
+            # FIX: In DMs, ephemeral works but let's be explicit about the response
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "⛔ You're not whitelisted to use this bot!", 
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "⛔ You're not whitelisted to use this bot!", 
+                        ephemeral=True
+                    )
+            except Exception as e:
+                print(f"Whitelist check error: {e}")
             return False
         
         return True
     
     async def log_usage(self, interaction: discord.Interaction, command: str, details: str = ""):
-        """Log command usage to webhook"""
-        guild_name = interaction.guild.name if interaction.guild else "DM"
-        channel_name = interaction.channel.name if interaction.channel and hasattr(interaction.channel, 'name') else "Direct Message"
-        
-        embed = discord.Embed(
-            title=f"📝 /{command} Used",
-            description=f"**User:** {interaction.user.name} (`{interaction.user.id}`)\n**Location:** {guild_name} / {channel_name}\n**Details:** {details}",
-            color=0x00D4AA,
-            timestamp=datetime.now()
-        )
-        
-        await self.webhook.log(embed=embed)
+        """Log command usage to webhook - FIXED for DMs"""
+        try:
+            # FIX: Properly handle DM channels
+            if interaction.guild:
+                guild_name = interaction.guild.name
+            else:
+                guild_name = "DM"
+            
+            # FIX: Handle different channel types properly
+            if isinstance(interaction.channel, discord.DMChannel):
+                channel_name = f"DM with {interaction.channel.recipient}" if interaction.channel.recipient else "DM"
+            elif isinstance(interaction.channel, discord.GroupChannel):
+                channel_name = "Group DM"
+            elif hasattr(interaction.channel, 'name'):
+                channel_name = interaction.channel.name
+            else:
+                channel_name = "Unknown"
+            
+            embed = discord.Embed(
+                title=f"📝 /{command} Used",
+                description=f"**User:** {interaction.user.name} (`{interaction.user.id}`)\n**Location:** {guild_name} / {channel_name}\n**Details:** {details}",
+                color=0x00D4AA,
+                timestamp=datetime.now()
+            )
+            
+            await self.webhook.log(embed=embed)
+        except Exception as e:
+            print(f"Log usage error: {e}")
+            # Don't let logging errors break the command
     
     async def do_whitelist(self, interaction: discord.Interaction, user_input: str):
         if str(interaction.user.id) != str(OWNER_ID):
-            await interaction.response.send_message("⛔ Only owner can use this!", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("⛔ Only owner can use this!", ephemeral=True)
+            else:
+                await interaction.followup.send("⛔ Only owner can use this!", ephemeral=True)
             return
         
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         
         target_id = re.sub(r'[<@!>]', '', user_input).strip()
         
@@ -345,7 +393,9 @@ class Bot(discord.Client):
         # Log usage
         await self.log_usage(interaction, "scan", f"Hint: {hint}" if hint else "No hint")
         
-        await interaction.response.defer()
+        # FIX: Check if already responded before deferring
+        if not interaction.response.is_done():
+            await interaction.response.defer()
         
         try:
             if image.size and image.size > 50 * 1024 * 1024:
@@ -535,10 +585,14 @@ class Bot(discord.Client):
         
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
-            await interaction.response.send_message("❌ Invalid URL format", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Invalid URL format", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Invalid URL format", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        if not interaction.response.is_done():
+            await interaction.response.defer()
         
         try:
             result = await self.downloader.download(url, str(interaction.user.id))
