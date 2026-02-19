@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 warnings.filterwarnings('ignore')
 
-# Config - USE ENVIRONMENT VARIABLES ONLY (Railway way)
+# Config
 OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
 OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', '')
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -32,7 +32,6 @@ print("=" * 60)
 print("🎯 TRUE OMEGA BOT - RAILWAY DEPLOYMENT")
 print("=" * 60)
 
-# Imports
 try:
     import discord
     from discord import app_commands
@@ -41,7 +40,6 @@ except Exception as e:
     print(f"❌ Import error: {e}")
     sys.exit(1)
 
-# Check for yt-dlp
 try:
     import yt_dlp
     YTDLP_AVAILABLE = True
@@ -61,7 +59,6 @@ class WebhookLogger:
     async def log(self, content=None, embed=None, username="TRUE OMEGA Logger"):
         if not self.session:
             await self.setup()
-        
         try:
             payload = {
                 "username": username,
@@ -175,10 +172,8 @@ class UniversalDownloader:
 
 class Bot(discord.Client):
     def __init__(self):
-        # FIX: Explicitly enable DM messages intent
         intents = discord.Intents.default()
         intents.dm_messages = True
-        intents.message_content = True  # Helps with debugging if needed
         
         super().__init__(
             intents=intents,
@@ -207,10 +202,8 @@ class Bot(discord.Client):
     async def setup_hook(self):
         print("🔧 Setting up bot...")
         
-        # Setup webhook
         await self.webhook.setup()
         
-        # Load whitelist
         try:
             if os.path.exists(self.whitelist_file):
                 with open(self.whitelist_file, 'r') as f:
@@ -226,37 +219,43 @@ class Bot(discord.Client):
         self.session = aiohttp.ClientSession()
         self.downloader = UniversalDownloader()
         
-        # Register commands with explicit DM permission
-        @self.tree.command(
-            name="scan", 
-            description="🔍 Scan Roblox username from image",
-            extras={"dm_permission": True}  # Explicitly allow DMs
-        )
+        # Register commands - allow DMs
+        @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
         @app_commands.describe(image="Screenshot to scan", hint="Optional username hint")
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
+            # CRITICAL: Defer IMMEDIATELY before any other logic
+            await interaction.response.defer()
+            
+            if not self.is_whitelisted(str(interaction.user.id)):
+                await interaction.followup.send("⛔ You're not whitelisted!", ephemeral=True)
+                return
+            
             await self.do_scan(interaction, image, hint)
         
-        @self.tree.command(
-            name="download", 
-            description="📥 Download any video to MP4",
-            extras={"dm_permission": True}
-        )
+        @self.tree.command(name="download", description="📥 Download any video to MP4")
         @app_commands.describe(url="Any video URL (YouTube, Medal, Streamable, direct MP4, etc.)")
         async def download(interaction: discord.Interaction, url: str):
+            await interaction.response.defer()
+            
+            if not self.is_whitelisted(str(interaction.user.id)):
+                await interaction.followup.send("⛔ You're not whitelisted!", ephemeral=True)
+                return
+            
             await self.do_download(interaction, url)
         
-        @self.tree.command(
-            name="whitelist", 
-            description="⚙️ Add/Remove user from whitelist (Owner only)",
-            extras={"dm_permission": True}
-        )
-        @app_commands.describe(user="User to whitelist/unwhitelist (@mention or ID)")
+        @self.tree.command(name="whitelist", description="⚙️ Manage whitelist (Owner only)")
+        @app_commands.describe(user="User to add/remove (@mention or ID)")
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
+            await interaction.response.defer(ephemeral=True)
+            
+            if str(interaction.user.id) != str(OWNER_ID):
+                await interaction.followup.send("⛔ Only owner!", ephemeral=True)
+                return
+            
             await self.do_whitelist(interaction, user)
         
         # Sync commands
         await self.sync_commands_with_retry()
-        
         print("✅ Bot setup complete!")
     
     async def sync_commands_with_retry(self, max_retries=5):
@@ -264,9 +263,7 @@ class Bot(discord.Client):
             try:
                 print(f"🔄 Syncing commands (attempt {attempt + 1}/{max_retries})...")
                 synced = await self.tree.sync()
-                print(f"✅ Synced {len(synced)} commands globally:")
-                for cmd in synced:
-                    print(f"   - /{cmd.name}")
+                print(f"✅ Synced {len(synced)} commands globally")
                 self.commands_synced = True
                 return True
             except discord.HTTPException as e:
@@ -281,46 +278,18 @@ class Bot(discord.Client):
                 print(f"⚠️ Sync error: {e}")
                 await asyncio.sleep(2 ** attempt)
         
-        print("❌ Failed to sync commands after all retries")
+        print("❌ Failed to sync commands")
         return False
     
-    async def check_whitelist(self, interaction: discord.Interaction) -> bool:
-        user_id = str(interaction.user.id)
-        
-        if user_id == str(OWNER_ID):
-            return True
-        
-        if user_id not in self.whitelist:
-            # FIX: In DMs, ephemeral works but let's be explicit about the response
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(
-                        "⛔ You're not whitelisted to use this bot!", 
-                        ephemeral=True
-                    )
-                else:
-                    await interaction.response.send_message(
-                        "⛔ You're not whitelisted to use this bot!", 
-                        ephemeral=True
-                    )
-            except Exception as e:
-                print(f"Whitelist check error: {e}")
-            return False
-        
-        return True
-    
     async def log_usage(self, interaction: discord.Interaction, command: str, details: str = ""):
-        """Log command usage to webhook - FIXED for DMs"""
         try:
-            # FIX: Properly handle DM channels
             if interaction.guild:
                 guild_name = interaction.guild.name
             else:
                 guild_name = "DM"
             
-            # FIX: Handle different channel types properly
             if isinstance(interaction.channel, discord.DMChannel):
-                channel_name = f"DM with {interaction.channel.recipient}" if interaction.channel.recipient else "DM"
+                channel_name = "DM"
             elif isinstance(interaction.channel, discord.GroupChannel):
                 channel_name = "Group DM"
             elif hasattr(interaction.channel, 'name'):
@@ -337,24 +306,13 @@ class Bot(discord.Client):
             
             await self.webhook.log(embed=embed)
         except Exception as e:
-            print(f"Log usage error: {e}")
-            # Don't let logging errors break the command
+            print(f"Log error: {e}")
     
     async def do_whitelist(self, interaction: discord.Interaction, user_input: str):
-        if str(interaction.user.id) != str(OWNER_ID):
-            if not interaction.response.is_done():
-                await interaction.response.send_message("⛔ Only owner can use this!", ephemeral=True)
-            else:
-                await interaction.followup.send("⛔ Only owner can use this!", ephemeral=True)
-            return
-        
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
-        
         target_id = re.sub(r'[<@!>]', '', user_input).strip()
         
         if not target_id.isdigit():
-            await interaction.followup.send("❌ Invalid user ID! Use @mention or ID", ephemeral=True)
+            await interaction.followup.send("❌ Invalid user ID!", ephemeral=True)
             return
         
         if target_id in self.whitelist:
@@ -371,8 +329,8 @@ class Bot(discord.Client):
             except:
                 name = target_id
             
-            await self.webhook.log(content=f"❌ **{interaction.user.name}** removed **{name}** from whitelist")
-            await interaction.followup.send(f"❌ Removed {name} from whitelist", ephemeral=True)
+            await self.webhook.log(content=f"❌ Removed **{name}** from whitelist")
+            await interaction.followup.send(f"❌ Removed {name}", ephemeral=True)
         else:
             self.whitelist.add(target_id)
             self.save_whitelist()
@@ -383,19 +341,11 @@ class Bot(discord.Client):
             except:
                 name = target_id
             
-            await self.webhook.log(content=f"✅ **{interaction.user.name}** added **{name}** to whitelist")
-            await interaction.followup.send(f"✅ Added {name} to whitelist", ephemeral=True)
+            await self.webhook.log(content=f"✅ Added **{name}** to whitelist")
+            await interaction.followup.send(f"✅ Added {name}", ephemeral=True)
     
     async def do_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str):
-        if not await self.check_whitelist(interaction):
-            return
-        
-        # Log usage
         await self.log_usage(interaction, "scan", f"Hint: {hint}" if hint else "No hint")
-        
-        # FIX: Check if already responded before deferring
-        if not interaction.response.is_done():
-            await interaction.response.defer()
         
         try:
             if image.size and image.size > 50 * 1024 * 1024:
@@ -468,8 +418,6 @@ class Bot(discord.Client):
                                 continue
                             profile = await resp.json()
                         
-                        profile_display = profile.get('displayName', '')
-                        
                         if hint and username.lower() == hint:
                             verified_user = profile
                             verified_user['matched_by'] = 'hint'
@@ -489,7 +437,7 @@ class Bot(discord.Client):
                     continue
             
             if not verified_user:
-                await interaction.followup.send(f"❌ Could not verify any user. Tried: `{', '.join(all_tried[:5])}`")
+                await interaction.followup.send(f"❌ Could not verify. Tried: `{', '.join(all_tried[:5])}`")
                 return
             
             color = 0xFF0000 if verified_user.get('isBanned') else 0x00D4AA
@@ -577,22 +525,12 @@ class Bot(discord.Client):
         return users
     
     async def do_download(self, interaction: discord.Interaction, url: str):
-        if not await self.check_whitelist(interaction):
-            return
-        
-        # Log usage
         await self.log_usage(interaction, "download", f"URL: {url[:50]}...")
         
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("❌ Invalid URL format", ephemeral=True)
-            else:
-                await interaction.followup.send("❌ Invalid URL format", ephemeral=True)
+            await interaction.followup.send("❌ Invalid URL format")
             return
-        
-        if not interaction.response.is_done():
-            await interaction.response.defer()
         
         try:
             result = await self.downloader.download(url, str(interaction.user.id))
@@ -600,9 +538,9 @@ class Bot(discord.Client):
             if not result['success']:
                 error = result['error']
                 if 'format' in error.lower():
-                    await interaction.followup.send(f"❌ This video format isn't supported.\nError: `{error[:100]}`")
+                    await interaction.followup.send(f"❌ Format not supported: `{error[:100]}`")
                 elif 'unavailable' in error.lower():
-                    await interaction.followup.send(f"❌ Video unavailable. Check if it's private or deleted.")
+                    await interaction.followup.send("❌ Video unavailable (private/deleted)")
                 else:
                     await interaction.followup.send(f"❌ Download failed: `{error[:150]}`")
                 return
@@ -610,7 +548,7 @@ class Bot(discord.Client):
             size_mb = result['size'] / (1024 * 1024)
             
             if result['size'] > 25 * 1024 * 1024:
-                await interaction.followup.send(f"⚠️ File too large ({size_mb:.1f}MB). Max is 25MB for Discord.")
+                await interaction.followup.send(f"⚠️ File too large ({size_mb:.1f}MB). Max 25MB.")
                 self.downloader.cleanup(result['file_path'])
                 return
             
@@ -642,7 +580,6 @@ class Bot(discord.Client):
         print(f"   ID: {self.user.id}")
         print(f"   Servers: {len(self.guilds)}")
         print(f"   Whitelisted: {len(self.whitelist)} users")
-        print(f"   Commands Synced: {self.commands_synced}")
         print(f"{'='*60}\n")
 
 def main():
@@ -650,12 +587,12 @@ def main():
         try:
             bot = Bot()
             bot.run(TOKEN, log_handler=None)
-            print("\n⚠️ Bot stopped, restarting in 5 seconds...")
+            print("\n⚠️ Bot stopped, restarting in 5s...")
             time.sleep(5)
         except Exception as e:
             print(f"\n❌ Fatal error: {e}")
             traceback.print_exc()
-            print("\nRestarting in 10 seconds...")
+            print("\nRestarting in 10s...")
             time.sleep(10)
 
 if __name__ == "__main__":
