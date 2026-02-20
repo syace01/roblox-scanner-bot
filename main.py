@@ -1,4 +1,4 @@
-""" 🎯 TRUE OMEGA - FONT-PROOF OCR SCANNER """
+""" 🎯 TRUE OMEGA - FAST FONT-PROOF OCR """
 import os
 import sys
 import asyncio
@@ -16,6 +16,7 @@ import aiohttp
 import difflib
 from datetime import datetime
 from urllib.parse import urlparse, quote
+from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
@@ -29,7 +30,7 @@ if not TOKEN:
     sys.exit(1)
 
 print("=" * 60)
-print("🎯 TRUE OMEGA BOT - FONT-PROOF OCR SCANNER")
+print("🎯 TRUE OMEGA - FAST FONT-PROOF OCR")
 print("=" * 60)
 
 try:
@@ -79,6 +80,9 @@ try:
 except:
     PIL_AVAILABLE = False
     print("⚠️ Pillow not available")
+
+# Thread pool for CPU-intensive OCR
+ocr_executor = ThreadPoolExecutor(max_workers=4)
 
 class WebhookLogger:
     def __init__(self, webhook_url):
@@ -146,8 +150,8 @@ class UniversalDownloader:
         except:
             pass
 
-class FontProofOCR:
-    """Multi-engine OCR with heavy preprocessing for custom fonts"""
+class FastOCRScanner:
+    """Optimized OCR with parallel processing and early exit"""
     
     def __init__(self):
         self.session = None
@@ -162,209 +166,136 @@ class FontProofOCR:
     async def setup(self):
         self.session = aiohttp.ClientSession()
     
-    def preprocess_for_ocr(self, image_data: bytes, method: str = "standard") -> bytes:
-        """Apply various preprocessing techniques based on method"""
+    def preprocess_fast(self, image_data: bytes, method: str) -> bytes:
+        """Fast preprocessing - no heavy operations"""
         if not PIL_AVAILABLE:
             return image_data
-        
         try:
             img = Image.open(io.BytesIO(image_data))
-            
-            # Convert to RGB if necessary
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            if method == "standard":
-                # Basic enhancement
+            if method == "contrast":
+                # Fast: just resize and contrast
                 img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
                 enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(2.0)
-                enhancer = ImageEnhance.Sharpness(img)
-                img = enhancer.enhance(2.0)
+                img = enhancer.enhance(2.5)
                 
-            elif method == "grayscale":
-                # High contrast grayscale
+            elif method == "bw":
+                # Fast: grayscale + threshold
                 img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
                 img = ImageOps.grayscale(img)
-                enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(3.0)
                 img = img.point(lambda x: 0 if x < 128 else 255, '1')
                 img = img.convert('RGB')
                 
-            elif method == "inverted":
-                # Inverted colors (for dark text on light backgrounds)
+            elif method == "sharp":
+                # Fast: sharpen once
                 img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
-                img = ImageOps.invert(img)
-                enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(2.5)
-                
-            elif method == "threshold":
-                # Adaptive thresholding simulation
-                img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
-                img = ImageOps.grayscale(img)
-                img = img.filter(ImageFilter.MedianFilter(size=3))
-                enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(4.0)
-                # Apply threshold
-                img = img.point(lambda x: 0 if x < 100 else 255, '1')
-                img = img.convert('RGB')
-                
-            elif method == "sharpen":
-                # Heavy sharpening for blurry text
-                img = img.resize((img.width * 3, img.height * 3), Image.Resampling.LANCZOS)
-                for _ in range(3):
-                    img = img.filter(ImageFilter.SHARPEN)
-                enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(2.5)
-                
-            elif method == "edge":
-                # Edge enhancement for stylized fonts
-                img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
-                img = ImageOps.grayscale(img)
-                img = img.filter(ImageFilter.FIND_EDGES)
-                enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(3.0)
-                img = img.convert('RGB')
-                
-            elif method == "color_boost":
-                # Boost colors for colored text
-                img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
-                enhancer = ImageEnhance.Color(img)
-                img = enhancer.enhance(2.0)
-                enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(2.0)
-                
-            elif method == "denoise":
-                # Denoise for noisy images
-                img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
-                img = img.filter(ImageFilter.MedianFilter(size=5))
+                img = img.filter(ImageFilter.SHARPEN)
                 enhancer = ImageEnhance.Contrast(img)
                 img = enhancer.enhance(2.0)
             
-            # Save to bytes
             output = io.BytesIO()
-            img.save(output, format='PNG')
+            img.save(output, format='PNG', optimize=True)
             return output.getvalue()
-            
-        except Exception as e:
-            print(f"Preprocess error ({method}): {e}")
+        except:
             return image_data
     
-    def opencv_preprocess(self, image_data: bytes, method: str = "adaptive") -> bytes:
-        """OpenCV-based preprocessing for better font handling"""
+    def opencv_fast(self, image_data: bytes, method: str) -> bytes:
+        """Fast OpenCV preprocessing"""
         if not CV2_AVAILABLE or not NP_AVAILABLE:
             return image_data
-        
         try:
             nparr = np.frombuffer(image_data, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            # Upscale for better OCR
-            img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
             
             if method == "adaptive":
-                # Convert to grayscale
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                # Apply adaptive thresholding
                 binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                                cv2.THRESH_BINARY, 11, 2)
                 img = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-                
-            elif method == "otsu":
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                img = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-                
-            elif method == "morph":
-                # Morphological operations for stylized fonts
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                kernel = np.ones((2, 2), np.uint8)
-                img = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-                img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                
             elif method == "clahe":
-                # CLAHE for contrast enhancement
                 lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
                 l, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
                 l = clahe.apply(l)
-                lab = cv2.merge([l, a, b])
-                img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+                img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
             
-            # Encode back to bytes
             _, buffer = cv2.imencode('.png', img)
             return buffer.tobytes()
-            
-        except Exception as e:
-            print(f"OpenCV preprocess error ({method}): {e}")
+        except:
             return image_data
     
-    async def scan_with_preprocessing(self, image_data: bytes, hint: str = None) -> dict:
-        """Run OCR with multiple preprocessing methods"""
-        results = {"success": False, "users": [], "best_match": None, "ocr_texts": {}}
+    async def scan_fast(self, image_data: bytes, hint: str = None) -> dict:
+        """Fast parallel OCR with early exit on high confidence"""
+        results = {"success": False, "users": [], "best_match": None, "ocr_texts": {}, "methods_tried": []}
         all_texts = []
         
-        # Define preprocessing pipelines
-        pil_methods = ["standard", "grayscale", "inverted", "threshold", "sharpen", "edge", "color_boost", "denoise"]
-        cv_methods = ["adaptive", "otsu", "morph", "clahe"] if CV2_AVAILABLE else []
+        # Create preprocessed versions in parallel
+        preprocess_tasks = []
+        methods = []
         
-        # Try OCR.Space with different preprocessed versions
+        if PIL_AVAILABLE:
+            for method in ["contrast", "bw", "sharp"]:
+                preprocess_tasks.append(asyncio.get_event_loop().run_in_executor(
+                    None, self.preprocess_fast, image_data, method))
+                methods.append(f"pil_{method}")
+        
+        if CV2_AVAILABLE and NP_AVAILABLE:
+            for method in ["adaptive", "clahe"]:
+                preprocess_tasks.append(asyncio.get_event_loop().run_in_executor(
+                    None, self.opencv_fast, image_data, method))
+                methods.append(f"cv_{method}")
+        
+        # Also include raw
+        processed_images = [image_data]
+        method_names = ["raw"]
+        
+        if preprocess_tasks:
+            processed = await asyncio.gather(*preprocess_tasks)
+            for img, name in zip(processed, methods):
+                if img != image_data:
+                    processed_images.append(img)
+                    method_names.append(name)
+        
+        # Run OCRs in parallel with early cancellation
+        ocr_tasks = []
+        
+        # OCR.Space on multiple versions
         if OCR_SPACE_KEY:
-            for method in pil_methods[:4]:  # First 4 methods for OCR.Space
-                try:
-                    processed = self.preprocess_for_ocr(image_data, method)
-                    text = await self._ocr_space(processed)
-                    if text and len(text) > 5:
-                        key = f"OCR.Space-{method}"
-                        results["ocr_texts"][key] = text
-                        all_texts.append(text)
-                        print(f"✅ OCR.Space ({method}): found text")
-                except Exception as e:
-                    print(f"OCR.Space ({method}) error: {e}")
+            for img, name in zip(processed_images[:3], method_names[:3]):  # Limit to 3 for speed
+                ocr_tasks.append(self._ocr_space_with_name(img, name))
         
-        # Try EasyOCR with OpenCV preprocessing
-        if self.easyocr_reader:
-            for method in cv_methods + ["standard"]:
-                try:
-                    if method in cv_methods:
-                        processed = self.opencv_preprocess(image_data, method)
-                    else:
-                        processed = self.preprocess_for_ocr(image_data, method)
-                    
-                    text = await self._easyocr(processed)
-                    if text and len(text) > 5:
-                        key = f"EasyOCR-{method}"
-                        results["ocr_texts"][key] = text
-                        all_texts.append(text)
-                        print(f"✅ EasyOCR ({method}): found text")
-                except Exception as e:
-                    print(f"EasyOCR ({method}) error: {e}")
+        # EasyOCR on best preprocessed version
+        if self.easyocr_reader and len(processed_images) > 0:
+            ocr_tasks.append(self._easyocr_with_name(processed_images[0], "easyocr"))
         
-        # Try raw image as fallback
-        if not all_texts:
-            try:
-                text = await self._ocr_space(image_data)
-                if text:
-                    results["ocr_texts"]["OCR.Space-raw"] = text
-                    all_texts.append(text)
-            except:
-                pass
+        # Gather all OCR results
+        ocr_results = await asyncio.gather(*ocr_tasks, return_exceptions=True)
+        
+        for result in ocr_results:
+            if isinstance(result, Exception):
+                continue
+            if result and result[1]:  # (name, text)
+                name, text = result
+                results["ocr_texts"][name] = text
+                results["methods_tried"].append(name)
+                all_texts.append(text)
         
         if not all_texts:
             return results
         
-        # Combine all detected texts
-        combined = self._combine_texts_smart(all_texts)
+        # Combine and extract
+        combined = self._combine_texts_fast(all_texts)
         results["combined_text"] = combined
         
-        # Extract usernames
-        users = self._extract_usernames_advanced(combined, hint)
+        users = self._extract_roblox_users_fast(combined, hint)
         if not users:
             return results
         
-        # Verify users
-        verified = await self._verify_users(users, combined, hint)
+        # Verify - early exit if perfect match
+        verified = await self._verify_fast(users, combined, hint)
         if verified:
             results["success"] = True
             results["users"] = verified
@@ -372,8 +303,8 @@ class FontProofOCR:
         
         return results
     
-    async def _ocr_space(self, image_data: bytes) -> str:
-        """OCR.Space API with retry"""
+    async def _ocr_space_with_name(self, image_data: bytes, name: str) -> tuple:
+        """OCR.Space with timeout"""
         try:
             b64 = base64.b64encode(image_data).decode()
             data = {
@@ -381,168 +312,136 @@ class FontProofOCR:
                 'base64Image': f'data:image/png;base64,{b64}',
                 'OCREngine': '2',
                 'scale': 'true',
-                'detectOrientation': 'true',
-                'isTable': 'false',
             }
-            async with self.session.post('https://api.ocr.space/parse/image', data=data, timeout=45) as resp:
+            async with self.session.post('https://api.ocr.space/parse/image', data=data, timeout=20) as resp:
                 result = await resp.json()
             if result.get('IsErroredOnProcessing'):
-                return ""
-            return result.get('ParsedResults', [{}])[0].get('ParsedText', '')
-        except Exception as e:
-            print(f"OCR.Space error: {e}")
-            return ""
+                return (name, "")
+            text = result.get('ParsedResults', [{}])[0].get('ParsedText', '')
+            return (name, text)
+        except asyncio.TimeoutError:
+            return (name, "")
+        except:
+            return (name, "")
     
-    async def _easyocr(self, image_data: bytes) -> str:
-        """EasyOCR processing"""
+    async def _easyocr_with_name(self, image_data: bytes, name: str) -> tuple:
+        """EasyOCR in thread pool"""
         if not self.easyocr_reader or not NP_AVAILABLE:
-            return ""
+            return (name, "")
         try:
             import cv2
             nparr = np.frombuffer(image_data, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, self.easyocr_reader.readtext, img)
-            return '\n'.join([item[1] for item in result])
-        except Exception as e:
-            print(f"EasyOCR error: {e}")
-            return ""
+            result = await asyncio.wait_for(
+                loop.run_in_executor(ocr_executor, self.easyocr_reader.readtext, img),
+                timeout=15
+            )
+            text = '\n'.join([item[1] for item in result])
+            return (name, text)
+        except asyncio.TimeoutError:
+            return (name, "")
+        except:
+            return (name, "")
     
-    def _combine_texts_smart(self, texts: list) -> str:
-        """Intelligently combine texts from multiple sources, removing duplicates"""
+    def _combine_texts_fast(self, texts: list) -> str:
+        """Fast deduplication"""
         all_lines = []
-        seen_normalized = set()
-        
+        seen = set()
         for text in texts:
-            lines = text.split('\n')
-            for line in lines:
+            for line in text.split('\n'):
                 cleaned = line.strip()
-                if cleaned and len(cleaned) > 2:
-                    # Normalize for deduplication
-                    normalized = re.sub(r'[^\w@]', '', cleaned).lower()
-                    # Also try without numbers for font variations
-                    normalized_alpha = re.sub(r'[^\w@]', '', cleaned).lower()
-                    normalized_alpha = re.sub(r'[0-9]', '', normalized_alpha)
-                    
-                    if normalized not in seen_normalized and normalized_alpha not in seen_normalized:
-                        seen_normalized.add(normalized)
+                if cleaned and len(cleaned) > 1:
+                    norm = re.sub(r'[^\w@]', '', cleaned).lower()
+                    if norm and norm not in seen:
+                        seen.add(norm)
                         all_lines.append(cleaned)
-        
         return '\n'.join(all_lines)
     
-    def _extract_usernames_advanced(self, text: str, hint: str = None) -> list:
-        """Advanced username extraction with fuzzy matching"""
+    def _extract_roblox_users_fast(self, text: str, hint: str) -> list:
+        """Optimized Roblox username extraction"""
         users = []
         lines = text.split('\n')
         text_lower = text.lower()
         
-        # Common words to filter out
-        common = {'the', 'and', 'for', 'you', 'roblox', 'profile', 'home', 'games', 'friends', 
-                  'inventory', 'avatar', 'shop', 'create', 'about', 'chat', 'party', 'trade', 
-                  'premium', 'settings', 'search', 'menu', 'play', 'join', 'exit', 'back',
-                  'online', 'offline', 'away', 'busy', 'appear', 'offline', 'studio', 'create'}
+        # Roblox UI common words to exclude
+        exclude = {'roblox', 'profile', 'home', 'games', 'friends', 'inventory', 
+                   'avatar', 'shop', 'create', 'about', 'chat', 'trade', 'premium',
+                   'settings', 'search', 'menu', 'play', 'join', 'exit', 'back',
+                   'online', 'offline', 'away', 'busy', 'studio', 'more', 'catalog',
+                   'develop', 'money', 'transactions', 'groups', 'messages', 'notifications',
+                   'the', 'and', 'for', 'you', 'are', 'can', 'all', 'any', 'use', 'new',
+                   'add', 'edit', 'delete', 'view', 'open', 'close', 'send', 'get', 'go',
+                   'connection', 'match', 'confidence', 'verification', 'status', 'created',
+                   'user', 'id', 'about', 'other', 'matches', 'banned', 'active', 'today',
+                   'font', 'proof', 'scanning', 'omega', 'true'}
         
-        # Strategy 1: @mentions with context
+        # Pattern 1: @username (most common in Roblox)
         for i, line in enumerate(lines):
-            # Various @ patterns
-            at_patterns = [
-                r'@([A-Za-z0-9_]{3,20})\b',
-                r'@\s*([A-Za-z0-9_]{3,20})\b',
-                r'[@＠]([A-Za-z0-9_]{3,20})\b',  # Fullwidth @
-            ]
-            
-            for pattern in at_patterns:
-                matches = re.findall(pattern, line)
-                for username in matches:
-                    data = {'username': username, 'display': None, 'confidence': 0.75, 'source': 'at'}
+            # Multiple @ patterns for different fonts
+            matches = re.findall(r'[@＠﹫]([A-Za-z0-9_]{3,20})\b', line)
+            for username in matches:
+                username_lower = username.lower()
+                if username_lower in exclude:
+                    continue
                     
-                    # Look for display name before @
-                    parts = re.split(r'[@＠]', line)
-                    if len(parts) > 1:
-                        before = re.sub(r'[^\w\s]', '', parts[0]).strip()
-                        if before and len(before) > 1 and before.lower() not in common:
-                            data['display'] = before
-                            data['confidence'] = 0.9
-                    
-                    # Check previous line
-                    if not data['display'] and i > 0:
-                        prev = lines[i-1].strip()
-                        if prev and '@' not in prev and len(prev) < 30 and prev.lower() not in common:
-                            data['display'] = prev
-                            data['confidence'] = 0.85
-                    
-                    # Check next line
-                    if not data['display'] and i < len(lines) - 1:
-                        next_line = lines[i+1].strip()
-                        if next_line and '@' not in next_line and len(next_line) < 30 and next_line.lower() not in common:
-                            data['display'] = next_line
-                            data['confidence'] = 0.85
-                    
-                    users.append(data)
+                conf = 0.85
+                display = None
+                
+                # Check line before @ for display name
+                parts = re.split(r'[@＠﹫]', line)
+                if len(parts) > 1:
+                    before = parts[0].strip()
+                    before_clean = re.sub(r'[^\w\s]', '', before).strip()
+                    if before_clean and len(before_clean) > 1 and before_clean.lower() not in exclude:
+                        display = before_clean
+                        conf = 0.95
+                
+                # Check previous line
+                if not display and i > 0:
+                    prev = lines[i-1].strip()
+                    prev_clean = re.sub(r'[^\w\s]', '', prev).strip()
+                    if prev_clean and 2 < len(prev_clean) < 25 and prev_clean.lower() not in exclude:
+                        display = prev_clean
+                        conf = 0.9
+                
+                users.append({'username': username, 'display': display, 'confidence': conf, 'source': '@mention'})
         
-        # Strategy 2: Roblox URLs
-        url_patterns = [
-            r'roblox\.com/users/(\d+)',
-            r'roblox\.com/user\.aspx\?id=(\d+)',
-            r'web\.roblox\.com/users/(\d+)',
-            r'rblx\.co/[a-zA-Z0-9]+',
-        ]
-        for pattern in url_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                if pattern.startswith('rblx'):
-                    users.insert(0, {'username': f'SHORT:{match}', 'short': match, 'confidence': 0.8, 'source': 'shorturl'})
-                else:
-                    users.insert(0, {'username': f'ID:{match}', 'id': match, 'confidence': 0.95, 'source': 'url'})
+        # Pattern 2: Roblox URLs (high confidence)
+        url_matches = re.findall(r'roblox\.com/users/(\d+)', text, re.IGNORECASE)
+        for uid in url_matches:
+            users.insert(0, {'username': f'ID:{uid}', 'id': uid, 'confidence': 0.98, 'source': 'url'})
         
-        # Strategy 3: Display name + username pairs (common in Roblox UI)
-        for i, line in enumerate(lines):
-            # Pattern: "DisplayName @Username" or "DisplayName Username"
-            pair_patterns = [
-                r'([A-Za-z][A-Za-z\s]{1,20}[A-Za-z])\s*[@\s]\s*([A-Za-z0-9_]{3,20})\b',
-                r'^([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+([a-z0-9_]{3,20})$',
-            ]
-            for pattern in pair_patterns:
-                match = re.search(pattern, line)
-                if match:
-                    display, username = match.group(1).strip(), match.group(2)
-                    if display.lower() not in common and username.lower() not in common:
-                        existing = next((u for u in users if u['username'].lower() == username.lower()), None)
-                        if existing:
-                            existing['display'] = display
-                            existing['confidence'] = 0.95
-                            existing['source'] = 'pair'
-                        else:
-                            users.append({'username': username, 'display': display, 'confidence': 0.95, 'source': 'pair'})
+        # Pattern 3: "Display @Username" or "Display Username" pairs
+        for line in lines:
+            # Common Roblox UI pattern
+            pair = re.search(r'^([A-Z][a-zA-Z\s]{1,18}[a-zA-Z])\s*[@\s]\s*([a-z][a-z0-9_]{2,19})\b', line)
+            if pair:
+                display, username = pair.group(1).strip(), pair.group(2)
+                if display.lower() not in exclude and username.lower() not in exclude:
+                    existing = next((u for u in users if u['username'].lower() == username.lower()), None)
+                    if existing:
+                        existing['display'] = display
+                        existing['confidence'] = 0.98
+                        existing['source'] = 'display@user'
+                    else:
+                        users.append({'username': username, 'display': display, 'confidence': 0.98, 'source': 'display@user'})
         
-        # Strategy 4: Pattern matching for potential usernames
-        # Look for text that matches username patterns
-        potential = re.findall(r'\b([A-Za-z][A-Za-z0-9_]{2,19})\b', text)
-        username_like = re.findall(r'\b([a-z0-9_]{3,20})\b', text_lower)
+        # Pattern 4: Username-like patterns (low confidence)
+        potentials = re.findall(r'\b([a-z][a-z0-9_]{2,19})\b', text_lower)
+        for name in set(potentials):
+            if name not in exclude:
+                if not any(u['username'].lower() == name for u in users):
+                    # Check if near @ symbol in text
+                    near_at = f'@{name}' in text_lower or f'@ {name}' in text_lower
+                    conf = 0.6 if near_at else 0.45
+                    users.append({'username': name, 'display': None, 'confidence': conf, 'source': 'pattern'})
         
-        all_potential = list(set(potential + username_like))
-        
-        for name in all_potential:
-            name_lower = name.lower()
-            if name_lower not in common and len(name) >= 3:
-                if not any(u['username'].lower() == name_lower for u in users):
-                    # Check context - is it near other username indicators?
-                    context_score = 0.5
-                    if f'@{name}' in text or f'@ {name}' in text:
-                        context_score = 0.65
-                    if 'profile' in text_lower or 'user' in text_lower:
-                        context_score += 0.1
-                    users.append({'username': name, 'display': None, 'confidence': context_score, 'source': 'pattern'})
-        
-        # Strategy 5: OCR error correction - common misreadings
-        ocr_corrections = {
-            '0': 'o', '1': 'l', '5': 's', '@': 'a', '$': 's', '3': 'e', '8': 'b'
-        }
-        
-        # Strategy 6: Hint boost
+        # Pattern 5: Hint override
         if hint:
             h = hint.strip().lower().replace('@', '')
-            if re.match(r'^[a-z0-9_]{3,20}$', h):
+            if re.match(r'^[a-z0-9_]{3,20}$', h) and h not in exclude:
                 existing = next((u for u in users if u['username'].lower() == h), None)
                 if existing:
                     existing['confidence'] = 1.0
@@ -550,132 +449,106 @@ class FontProofOCR:
                 else:
                     users.insert(0, {'username': h, 'display': None, 'confidence': 1.0, 'source': 'hint'})
         
-        # Remove duplicates and sort
+        # Remove duplicates and sort by confidence
         seen = set()
-        unique_users = []
-        for u in users:
+        unique = []
+        for u in sorted(users, key=lambda x: x['confidence'], reverse=True):
             key = u['username'].lower()
             if key not in seen:
                 seen.add(key)
-                unique_users.append(u)
+                unique.append(u)
         
-        unique_users.sort(key=lambda x: x['confidence'], reverse=True)
-        return unique_users
+        return unique
     
-    async def _verify_users(self, potentials: list, full_text: str, hint: str) -> list:
-        """Verify users against Roblox API"""
+    async def _verify_fast(self, potentials: list, full_text: str, hint: str) -> list:
+        """Fast verification with early exit"""
         verified = []
         full_lower = full_text.lower()
         
-        for data in potentials[:8]:
+        for data in potentials[:6]:  # Limit to top 6
             username = data['username']
             
-            # Skip special cases for now
-            if username.startswith('ID:') or username.startswith('SHORT:'):
+            if username.startswith('ID:'):
                 continue
             
             try:
-                # Try exact match first
+                # Fast API call
                 async with self.session.post(
                     'https://users.roblox.com/v1/usernames/users',
                     json={"usernames": [username], "excludeBannedUsers": False},
-                    timeout=10
+                    timeout=8
                 ) as resp:
-                    if resp.status == 200:
-                        r = await resp.json()
-                        if r.get('data'):
-                            info = r['data'][0]
-                            profile = await self._get_profile(info['id'])
-                            if profile:
-                                score, reasons = self._calculate_match_score(data, profile, full_text, hint)
-                                verified.append({'profile': profile, 'score': score, 'reasons': reasons})
-                                continue
+                    if resp.status != 200:
+                        continue
+                    r = await resp.json()
+                    
+                    if not r.get('data'):
+                        # Try fuzzy search
+                        similar = await self._fuzzy_search_fast(username)
+                        if similar:
+                            r = {"data": [similar]}
+                        else:
+                            continue
+                    
+                    info = r['data'][0]
+                    
+                    # Get profile
+                    async with self.session.get(f'https://users.roblox.com/v1/users/{info["id"]}', timeout=8) as resp:
+                        if resp.status != 200:
+                            continue
+                        profile = await resp.json()
                 
-                # Try fuzzy search if exact fails
-                similar = await self._fuzzy_search(username)
-                if similar:
-                    profile = await self._get_profile(similar['id'])
-                    if profile:
-                        score, reasons = self._calculate_match_score(data, profile, full_text, hint, fuzzy=True)
-                        verified.append({'profile': profile, 'score': score, 'reasons': reasons})
-                        
+                # Calculate score
+                score = data['confidence']
+                reasons = [f"{data['source']} ({data['confidence']:.0%})"]
+                
+                prof_display = profile.get('displayName', '')
+                ocr_display = data.get('display')
+                
+                # Display match bonus
+                if ocr_display and prof_display:
+                    sim = difflib.SequenceMatcher(None, ocr_display.lower(), prof_display.lower()).ratio()
+                    if sim > 0.8:
+                        score = min(score + 0.15, 1.0)
+                        reasons.append(f"display:{sim:.0%}")
+                
+                if prof_display and prof_display.lower() in full_lower:
+                    score = min(score + 0.1, 1.0)
+                    reasons.append("display_in_img")
+                
+                # Hint bonus
+                if hint and username.lower() == hint.lower().replace('@', ''):
+                    score = 1.0
+                    reasons.append("🎯HINT")
+                
+                verified.append({'profile': profile, 'score': score, 'reasons': reasons})
+                
+                # Early exit if perfect match
+                if score >= 0.95:
+                    break
+                    
+            except asyncio.TimeoutError:
+                continue
             except Exception as e:
-                print(f"Verify error for {username}: {e}")
                 continue
         
         verified.sort(key=lambda x: x['score'], reverse=True)
         return verified
     
-    async def _get_profile(self, user_id: int) -> dict:
-        """Get user profile from Roblox"""
-        try:
-            async with self.session.get(f'https://users.roblox.com/v1/users/{user_id}', timeout=10) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-        except:
-            pass
-        return None
-    
-    def _calculate_match_score(self, ocr_data: dict, profile: dict, full_text: str, hint: str, fuzzy: bool = False) -> tuple:
-        """Calculate confidence score for a match"""
-        score = ocr_data['confidence']
-        reasons = [f"OCR: {ocr_data['source']} ({ocr_data['confidence']:.0%})"]
-        
-        if fuzzy:
-            score *= 0.9
-            reasons.append("Fuzzy match")
-        
-        # Display name matching
-        prof_display = profile.get('displayName', '')
-        ocr_display = ocr_data.get('display')
-        
-        if ocr_display and prof_display:
-            sim = difflib.SequenceMatcher(None, ocr_display.lower(), prof_display.lower()).ratio()
-            if sim > 0.8:
-                score += 0.2
-                reasons.append(f"Display: {sim:.0%}")
-            elif sim > 0.5:
-                score += 0.1
-                reasons.append(f"Display partial: {sim:.0%}")
-        
-        # Check if display appears in OCR text
-        if prof_display and prof_display.lower() in full_text.lower():
-            score += 0.1
-            reasons.append("Display in image")
-        
-        # Username appears in text (not @)
-        username = profile['name']
-        if f' {username.lower()}' in full_text.lower() or f'{username.lower()} ' in full_text.lower():
-            score += 0.05
-            reasons.append("Username in text")
-        
-        # Hint match
-        if hint:
-            h = hint.lower().replace('@', '')
-            if username.lower() == h:
-                score = 1.0
-                reasons.append("🎯 EXACT HINT")
-        
-        return min(score, 1.0), reasons
-    
-    async def _fuzzy_search(self, username: str) -> dict:
-        """Search for similar usernames"""
+    async def _fuzzy_search_fast(self, username: str) -> dict:
+        """Fast fuzzy search"""
         try:
             async with self.session.get(
-                f'https://users.roblox.com/v1/users/search?keyword={quote(username)}&limit=5',
-                timeout=10
+                f'https://users.roblox.com/v1/users/search?keyword={quote(username)}&limit=3',
+                timeout=8
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get('data'):
-                        best = None
-                        best_score = 0
                         for u in data['data']:
                             sim = difflib.SequenceMatcher(None, username.lower(), u['name'].lower()).ratio()
-                            if sim > best_score and sim > 0.7:
-                                best_score = sim
-                                best = u
-                        return best
+                            if sim > 0.75:
+                                return u
         except:
             pass
         return None
@@ -705,7 +578,7 @@ class Bot(discord.Client):
         print("🔧 Setting up...")
         await self.webhook.setup()
         
-        self.scanner = FontProofOCR()
+        self.scanner = FastOCRScanner()
         await self.scanner.setup()
         self.session = self.scanner.session
         self.downloader = UniversalDownloader()
@@ -723,7 +596,7 @@ class Bot(discord.Client):
         print("🔄 Syncing commands...")
         self.tree.clear_commands(guild=None)
         
-        @self.tree.command(name="scan", description="🔍 Scan Roblox username (FONT-PROOF)")
+        @self.tree.command(name="scan", description="🔍 FAST Roblox username scanner")
         @app_commands.describe(image="Screenshot", hint="Optional username hint")
         async def scan(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
             await interaction.response.defer()
@@ -793,31 +666,36 @@ class Bot(discord.Client):
             await interaction.followup.send(f"✅ Added {name}", ephemeral=True)
     
     async def do_scan(self, interaction, image, hint):
+        start_time = time.time()
         try:
             if image.size and image.size > 50 * 1024 * 1024:
                 await interaction.followup.send("❌ Image too large (max 50MB)")
                 return
             
-            async with self.session.get(image.url, timeout=30) as resp:
+            # Download image
+            async with self.session.get(image.url, timeout=15) as resp:
                 if resp.status != 200:
                     await interaction.followup.send("❌ Failed to download image")
                     return
                 img_data = await resp.read()
             
-            # Processing embed
+            # Quick processing message
             await interaction.followup.send(embed=discord.Embed(
-                title="🔍 Font-Proof Scanning...", 
-                description="Applying 10+ preprocessing filters...", 
+                title="🔍 Scanning...", 
+                description="Analyzing image...", 
                 color=0xFFA500
             ))
             
-            result = await self.scanner.scan_with_preprocessing(img_data, hint)
+            # Run fast scan
+            result = await self.scanner.scan_fast(img_data, hint)
+            
+            elapsed = time.time() - start_time
             
             if not result['success']:
-                preview = result.get('combined_text', 'Nothing detected')[:500]
+                preview = result.get('combined_text', 'Nothing')[:400]
                 await interaction.edit_original_response(embed=discord.Embed(
                     title="❌ No User Found",
-                    description=f"Couldn't verify any user after heavy preprocessing.\n\n**Detected text:**\n```{preview}...```\n\n*Tip: Try providing a hint with `/scan image:@user hint:username`*",
+                    description=f"Couldn't verify user.\n\n**Detected:**\n```{preview}...```\n\n*Try `/scan image:@user hint:username`*",
                     color=0xFF0000
                 ))
                 return
@@ -826,7 +704,7 @@ class Bot(discord.Client):
             profile = best['profile']
             score = best['score']
             
-            # Color based on confidence
+            # Color
             if profile.get('isBanned'):
                 color = 0x8B0000
             elif score >= 0.9:
@@ -838,29 +716,29 @@ class Bot(discord.Client):
             
             embed = discord.Embed(
                 title=f"{profile.get('displayName', profile['name'])}",
-                description=f"@{profile['name']}\n**Match Confidence:** `{score:.0%}`",
+                description=f"@{profile['name']}\n**Confidence:** `{score:.0%}`",
                 url=f'https://roblox.com/users/{profile["id"]}/profile',
                 color=color,
                 timestamp=datetime.now()
             )
             
-            embed.add_field(name="✅ Verification", value='\n'.join(best['reasons'][:4]), inline=False)
+            embed.add_field(name="✅ Verified", value=' | '.join(best['reasons'][:3]), inline=False)
             embed.add_field(name="🆔 User ID", value=f"`{profile['id']}`", inline=True)
             embed.add_field(name="📅 Created", value=str(profile.get('created', 'N/A'))[:10], inline=True)
             embed.add_field(name="⚡ Status", value="🔴 BANNED" if profile.get('isBanned') else "✅ Active", inline=True)
             
             if profile.get('description'):
-                desc = profile['description'][:200] + "..." if len(profile['description']) > 200 else profile['description']
+                desc = profile['description'][:180] + "..." if len(profile['description']) > 180 else profile['description']
                 embed.add_field(name="📝 About", value=desc, inline=False)
             
             if len(result['users']) > 1:
-                others = [f"`@{u['profile']['name']}` ({u['score']:.0%})" for u in result['users'][1:4]]
+                others = [f"`@{u['profile']['name']}` ({u['score']:.0%})" for u in result['users'][1:3]]
                 if others:
-                    embed.add_field(name="🔍 Other Matches", value=" | ".join(others), inline=False)
+                    embed.add_field(name="🔍 Others", value=" | ".join(others), inline=False)
             
             embed.set_image(url=image.url)
-            engines_used = len(result['ocr_texts'])
-            embed.set_footer(text=f"TRUE OMEGA | {engines_used} OCR attempts | Font-Proof v2")
+            methods = len(result.get('methods_tried', []))
+            embed.set_footer(text=f"⚡ {elapsed:.1f}s | {methods} methods | TRUE OMEGA")
             
             await interaction.edit_original_response(embed=embed)
             
