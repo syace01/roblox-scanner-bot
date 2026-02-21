@@ -1,6 +1,6 @@
 """
 🎯 TRUE OMEGA ULTIMATE - Production-Grade Roblox Scanner Bot
-Optimized for Railway.app deployment with PostgreSQL + Redis
+Optimized for Railway.app deployment
 """
 
 import os
@@ -16,7 +16,6 @@ import traceback
 import tempfile
 import hashlib
 import logging
-import signal
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, quote, unquote
 from collections import defaultdict
@@ -24,12 +23,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict, field
 from typing import Optional, List, Dict, Tuple, Any, Set
 from enum import Enum
-import functools
 
 warnings.filterwarnings('ignore')
 
 # ═══════════════════════════════════════════════════════════
-# LOGGING SETUP (Structured for Railway)
+# LOGGING SETUP
 # ═══════════════════════════════════════════════════════════
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -38,7 +36,6 @@ class JSONFormatter(logging.Formatter):
             "level": record.levelname,
             "message": record.getMessage(),
             "module": record.module,
-            "function": record.funcName,
         }
         if hasattr(record, "extra"):
             log_data.update(record.extra)
@@ -51,10 +48,9 @@ handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
 
 # ═══════════════════════════════════════════════════════════
-# CONFIGURATION & VALIDATION
+# CONFIGURATION
 # ═══════════════════════════════════════════════════════════
 class Config:
-    """Environment configuration with validation"""
     TOKEN = os.getenv('DISCORD_TOKEN')
     OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
     OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', '')
@@ -78,7 +74,7 @@ class Config:
 Config.validate()
 
 # ═══════════════════════════════════════════════════════════
-# SENTRY ERROR TRACKING (Optional)
+# SENTRY
 # ═══════════════════════════════════════════════════════════
 if Config.SENTRY_DSN:
     try:
@@ -86,7 +82,7 @@ if Config.SENTRY_DSN:
         sentry_sdk.init(dsn=Config.SENTRY_DSN, traces_sample_rate=0.1, profiles_sample_rate=0.1)
         logger.info("✅ Sentry initialized")
     except ImportError:
-        logger.warning("⚠️ Sentry DSN provided but sentry-sdk not installed")
+        pass
 
 # ═══════════════════════════════════════════════════════════
 # IMPORTS WITH FALLBACKS
@@ -96,14 +92,13 @@ import discord
 from discord import app_commands
 from discord.ui import Button, View, Select
 
-# Database imports
 try:
     import asyncpg
     DB_AVAILABLE = True
     logger.info("✅ asyncpg available")
 except ImportError:
     DB_AVAILABLE = False
-    logger.warning("⚠️ asyncpg not available, using JSON fallback")
+    logger.warning("⚠️ asyncpg not available")
 
 try:
     import redis.asyncio as redis
@@ -111,15 +106,14 @@ try:
     logger.info("✅ redis available")
 except ImportError:
     REDIS_AVAILABLE = False
-    logger.warning("⚠️ redis not available, using memory cache")
+    logger.warning("⚠️ redis not available")
 
-# OCR imports - SET PIL_AVAILABLE HERE
 try:
     import pytesseract
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps
     PIL_AVAILABLE = True
     TESSERACT_AVAILABLE = True
-    logger.info("✅ Tesseract and Pillow available")
+    logger.info("✅ Tesseract/Pillow available")
 except ImportError:
     PIL_AVAILABLE = False
     TESSERACT_AVAILABLE = False
@@ -148,7 +142,7 @@ except ImportError:
     logger.warning("⚠️ yt-dlp not available")
 
 # ═══════════════════════════════════════════════════════════
-# DATA CLASSES & ENUMS
+# DATA CLASSES
 # ═══════════════════════════════════════════════════════════
 class ScanStatus(Enum):
     SUCCESS = "success"
@@ -203,10 +197,10 @@ class DatabaseManager:
                 await self._create_tables()
                 logger.info("✅ PostgreSQL connected")
             except Exception as e:
-                logger.error(f"❌ PostgreSQL connection failed: {e}")
-                logger.info("🔄 Falling back to JSON storage")
+                logger.error(f"❌ PostgreSQL failed: {e}")
+                self._load_json()
         else:
-            logger.info("📁 Using JSON file storage")
+            logger.info("📁 Using JSON storage")
             self._load_json()
     
     async def _create_tables(self):
@@ -378,10 +372,9 @@ class CacheManager:
                 await self.redis.ping()
                 logger.info("✅ Redis connected")
             except Exception as e:
-                logger.error(f"❌ Redis connection failed: {e}")
-                logger.info("🔄 Using in-memory cache")
+                logger.error(f"❌ Redis failed: {e}")
         else:
-            logger.info("📁 Using in-memory cache")
+            logger.info("📁 Using memory cache")
     
     async def get(self, key: str) -> Optional[Any]:
         if self.redis:
@@ -420,7 +413,7 @@ class CacheManager:
             del self._local_cache[key]
 
 # ═══════════════════════════════════════════════════════════
-# ADVANCED OCR ENGINE
+# OCR PROCESSOR
 # ═══════════════════════════════════════════════════════════
 class OCRProcessor:
     def __init__(self):
@@ -635,7 +628,7 @@ class OCRProcessor:
         return '\n'.join(merged)
 
 # ═══════════════════════════════════════════════════════════
-# ROBLOX API MANAGER
+# ROBLOX API
 # ═══════════════════════════════════════════════════════════
 class RobloxAPI:
     def __init__(self, cache: CacheManager):
@@ -661,7 +654,7 @@ class RobloxAPI:
                 self._circuit_open = False
                 self._circuit_failures = 0
             else:
-                raise Exception("Circuit breaker open - too many failures")
+                raise Exception("Circuit breaker open")
     
     async def _make_request(self, method: str, url: str, **kwargs) -> Dict:
         await self._check_circuit_breaker()
@@ -1062,7 +1055,7 @@ class VideoDownloader:
             pass
 
 # ═══════════════════════════════════════════════════════════
-# DISCORD UI COMPONENTS
+# DISCORD UI COMPONENTS - FIXED PROFILE VIEW
 # ═══════════════════════════════════════════════════════════
 class ProfileView(View):
     def __init__(self, profile: Dict, bot: 'TrueOmegaBot', user_id: str):
@@ -1070,10 +1063,15 @@ class ProfileView(View):
         self.profile = profile
         self.bot = bot
         self.user_id = user_id
-    
-    @discord.ui.button(label="View Profile", style=discord.ButtonStyle.link, emoji="🔗")
-    async def view_profile(self, interaction: discord.Interaction, button: Button):
-        pass
+        
+        # Add link button with URL in constructor
+        profile_url = f"https://roblox.com/users/{profile['id']}/profile"
+        self.add_item(discord.ui.Button(
+            label="View Profile",
+            style=discord.ButtonStyle.link,
+            emoji="🔗",
+            url=profile_url
+        ))
     
     @discord.ui.button(label="Search Groups", style=discord.ButtonStyle.secondary, emoji="👥")
     async def search_groups(self, interaction: discord.Interaction, button: Button):
@@ -1303,34 +1301,23 @@ class TrueOmegaBot(discord.Client):
             )
             return
         
-        await interaction.response.defer()
-        
-        progress_embed = discord.Embed(
-            title="🔍 Scanning Image...",
-            description="```\n[░░░░░░░░░░] 0%\n```\n📥 Downloading image...",
-            color=0xFFA500
-        )
-        progress_embed.set_footer(text=f"Rate limit: {self.rate_limiter.get_remaining(user_id)} left")
-        await interaction.followup.send(embed=progress_embed)
+        # FASTER: Defer immediately without progress message, edit later
+        await interaction.response.defer(thinking=True)
         
         try:
             start_time = time.time()
             
+            # Download and OCR in parallel with timeout
             async with self.ocr.session.get(image.url, timeout=15) as resp:
                 if resp.status != 200:
                     raise Exception(f"Failed to download image: {resp.status}")
                 img_data = await resp.read()
             
-            progress_embed.description = "```\n[██░░░░░░░░] 20%\n```\n🔤 Running OCR analysis..."
-            await interaction.edit_original_response(embed=progress_embed)
-            
+            # Run OCR
             ocr_text, engines_used, ocr_confidence = await self.ocr.scan(img_data, hint)
             
             if not ocr_text:
                 raise Exception("No text detected in image")
-            
-            progress_embed.description = "```\n[████░░░░░░] 40%\n```\n🔍 Extracting usernames..."
-            await interaction.edit_original_response(embed=progress_embed)
             
             candidates = self.extractor.extract(ocr_text, hint)
             
@@ -1353,7 +1340,7 @@ class TrueOmegaBot(discord.Client):
                     inline=False
                 )
                 fail_embed.set_footer(text=f"OCR engines: {', '.join(engines_used)} | Time: {time.time()-start_time:.1f}s")
-                await interaction.edit_original_response(embed=fail_embed)
+                await interaction.followup.send(embed=fail_embed)
                 
                 stats = await self.db.get_user_stats(user_id)
                 stats.total_scans += 1
@@ -1362,9 +1349,7 @@ class TrueOmegaBot(discord.Client):
                 await self.db.update_user_stats(stats)
                 return
             
-            progress_embed.description = "```\n[██████░░░░] 60%\n```\n✅ Verifying with Roblox API..."
-            await interaction.edit_original_response(embed=progress_embed)
-            
+            # Verify candidates
             verified_profiles = []
             for candidate in candidates[:5]:
                 if candidate['username'].startswith('ID:'):
@@ -1408,7 +1393,7 @@ class TrueOmegaBot(discord.Client):
                             value="\n".join(f"• @{s}" for s in suggested[:3]),
                             inline=False
                         )
-                        await interaction.edit_original_response(embed=fail_embed)
+                        await interaction.followup.send(embed=fail_embed)
                         
                         stats = await self.db.get_user_stats(user_id)
                         stats.total_scans += 1
@@ -1420,9 +1405,6 @@ class TrueOmegaBot(discord.Client):
             profile = best['profile']
             score = best['score']
             
-            progress_embed.description = "```\n[██████████] 100%\n```\n✅ Scan complete!"
-            await interaction.edit_original_response(embed=progress_embed)
-            
             embed = self._create_profile_embed(profile, score, best['reasons'])
             embed.set_image(url=image.url)
             
@@ -1432,7 +1414,7 @@ class TrueOmegaBot(discord.Client):
                 alt_select = AlternativeSelect(verified_profiles[1:], self)
                 view.add_item(alt_select)
             
-            await interaction.edit_original_response(embed=embed, view=view)
+            await interaction.followup.send(embed=embed, view=view)
             
             stats = await self.db.get_user_stats(user_id)
             stats.total_scans += 1
@@ -1457,7 +1439,7 @@ class TrueOmegaBot(discord.Client):
                 description=f"An error occurred: `{str(e)[:200]}`\n\nPlease try again.",
                 color=0xFF0000
             )
-            await interaction.edit_original_response(embed=error_embed)
+            await interaction.followup.send(embed=error_embed)
             
             try:
                 stats = await self.db.get_user_stats(user_id)
@@ -1517,20 +1499,13 @@ class TrueOmegaBot(discord.Client):
         
         await interaction.response.defer()
         
-        embed = discord.Embed(
-            title="🔎 Searching...",
-            description=f"Looking for `@{username}`...",
-            color=0xFFA500
-        )
-        await interaction.followup.send(embed=embed)
-        
         try:
             profile = await self.roblox_api.get_user_by_username(username.strip())
             
             if profile:
                 result_embed = self._create_profile_embed(profile, 1.0, ["Direct search"])
                 view = ProfileView(profile, self, user_id)
-                await interaction.edit_original_response(embed=result_embed, view=view)
+                await interaction.followup.send(embed=result_embed, view=view)
                 return
             
             results = await self.roblox_api.search_users(username.strip(), limit=5)
@@ -1550,9 +1525,9 @@ class TrueOmegaBot(discord.Client):
                         inline=False
                     )
                 
-                await interaction.edit_original_response(embed=search_embed)
+                await interaction.followup.send(embed=search_embed)
             else:
-                await interaction.edit_original_response(embed=discord.Embed(
+                await interaction.followup.send(embed=discord.Embed(
                     title="❌ Not Found",
                     description=f"No user found matching `@{username}`",
                     color=0xFF0000
@@ -1560,7 +1535,7 @@ class TrueOmegaBot(discord.Client):
                 
         except Exception as e:
             logger.error(f"Search error: {e}")
-            await interaction.edit_original_response(embed=discord.Embed(
+            await interaction.followup.send(embed=discord.Embed(
                 title="❌ Error",
                 description=str(e)[:200],
                 color=0xFF0000
@@ -1583,17 +1558,10 @@ class TrueOmegaBot(discord.Client):
             )
             return
         
-        progress = discord.Embed(
-            title="📥 Downloading...",
-            description="Fetching video info...",
-            color=0xFFA500
-        )
-        await interaction.followup.send(embed=progress)
-        
         result = await self.downloader.download(url, user_id)
         
         if not result['success']:
-            await interaction.edit_original_response(embed=discord.Embed(
+            await interaction.followup.send(embed=discord.Embed(
                 title="❌ Download Failed",
                 description=f"```{result['error'][:500]}```",
                 color=0xFF0000
@@ -1602,7 +1570,7 @@ class TrueOmegaBot(discord.Client):
         
         size_mb = result['size'] / (1024 * 1024)
         if result['size'] > 25 * 1024 * 1024:
-            await interaction.edit_original_response(embed=discord.Embed(
+            await interaction.followup.send(embed=discord.Embed(
                 title="❌ File Too Large",
                 description=f"{size_mb:.1f}MB exceeds Discord's 25MB limit\n"
                            f"Try a shorter video or lower quality.",
@@ -1622,7 +1590,7 @@ class TrueOmegaBot(discord.Client):
         if result.get('uploader'):
             success_embed.add_field(name="👤 Uploader", value=result['uploader'][:50], inline=True)
         
-        await interaction.edit_original_response(embed=success_embed, attachments=[file])
+        await interaction.followup.send(embed=success_embed, file=file)
         self.downloader.cleanup(result['file_path'])
     
     async def cmd_stats(self, interaction: discord.Interaction):
@@ -1828,7 +1796,7 @@ class TrueOmegaBot(discord.Client):
         logger.info("✅ Shutdown complete")
 
 # ═══════════════════════════════════════════════════════════
-# HEALTH CHECK SERVER (for Railway)
+# HEALTH CHECK SERVER
 # ═══════════════════════════════════════════════════════════
 async def health_check_server():
     from aiohttp import web
