@@ -1,7 +1,30 @@
+# Discord Bot
 discord.py>=2.3.0
 aiohttp>=3.8.0
-yt-dlp
-Pillow
-numpy
-opencv-python-headless
-easyocr
+
+# Database (PostgreSQL for Railway)
+asyncpg>=0.28.0
+
+# Caching (Redis for Railway)
+redis>=5.0.0
+
+# OCR Engines
+pytesseract>=0.3.10
+easyocr>=1.7.0
+pillow>=10.0.0
+
+# Image Processing
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+
+# Video Downloading
+yt-dlp>=2023.12.30
+
+# Error Tracking (Optional but recommended for Railway)
+sentry-sdk>=1.39.0
+
+# Health Check Server
+aiohttp>=3.9.0
+
+# Utilities
+python-dotenv>=1.0.0
