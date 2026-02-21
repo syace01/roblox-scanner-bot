@@ -1303,7 +1303,7 @@ class TrueOmegaBot(discord.Client):
     def _register_commands(self):
         """Register all slash commands"""
         
-        @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
+        @self.tree.command(name="scan", description="🔍 Scan Roblox username from image", default_member_permissions=None)
         @app_commands.describe(
             image="Screenshot to scan",
             hint="Optional username hint (improves accuracy)"
@@ -1311,34 +1311,34 @@ class TrueOmegaBot(discord.Client):
         async def scan_cmd(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
             await self.cmd_scan(interaction, image, hint)
         
-        @self.tree.command(name="search", description="🔎 Search Roblox user by username")
+        @self.tree.command(name="search", description="🔎 Search Roblox user by username", default_member_permissions=None)
         @app_commands.describe(username="Roblox username to search")
         async def search_cmd(interaction: discord.Interaction, username: str):
             await self.cmd_search(interaction, username)
         
-        @self.tree.command(name="download", description="📥 Download video to MP4")
+        @self.tree.command(name="download", description="📥 Download video to MP4", default_member_permissions=None)
         @app_commands.describe(url="Video URL (YouTube, TikTok, etc.)")
         async def download_cmd(interaction: discord.Interaction, url: str):
             await self.cmd_download(interaction, url)
         
-        @self.tree.command(name="stats", description="📊 View your scan statistics")
+        @self.tree.command(name="stats", description="📊 View your scan statistics", default_member_permissions=None)
         async def stats_cmd(interaction: discord.Interaction):
             await self.cmd_stats(interaction)
         
-        @self.tree.command(name="history", description="📜 View your recent scans")
+        @self.tree.command(name="history", description="📜 View your recent scans", default_member_permissions=None)
         async def history_cmd(interaction: discord.Interaction):
             await self.cmd_history(interaction)
         
-        @self.tree.command(name="whitelist", description="⚙️ Manage whitelist (Owner only)")
+        @self.tree.command(name="whitelist", description="⚙️ Manage whitelist (Owner only)", default_member_permissions=None)
         @app_commands.describe(user="User to add/remove (ID or mention)")
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
             await self.cmd_whitelist(interaction, user)
         
-        @self.tree.command(name="help", description="❓ Show bot help and commands")
+        @self.tree.command(name="help", description="❓ Show bot help and commands", default_member_permissions=None)
         async def help_cmd(interaction: discord.Interaction):
             await self.cmd_help(interaction)
         
-        @self.tree.command(name="ping", description="🏓 Check bot latency")
+        @self.tree.command(name="ping", description="🏓 Check bot latency", default_member_permissions=None)
         async def ping_cmd(interaction: discord.Interaction):
             await self.cmd_ping(interaction)
     
