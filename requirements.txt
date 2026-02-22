@@ -1,37 +1,18 @@
-# ═══════════════════════════════════════════════════════════
-# TRUE OMEGA v4.0 - ULTIMATE DEPENDENCIES
-# ═══════════════════════════════════════════════════════════
-
-# Discord Bot - Latest stable
+# Discord Bot
 discord.py>=2.3.0
 
-# HTTP Client - Speed optimizations
-aiohttp[speedups]>=3.9.0
-aiohttp-retry>=2.8.0
+# HTTP Client
+aiohttp>=3.9.0
 
-# JSON Performance
-orjson>=3.9.0
-
-# Database
-asyncpg>=0.28.0
-
-# Caching
-redis>=5.0.0
-
-# OCR Engines
+# OCR
 pytesseract>=0.3.10
 easyocr>=1.7.0
-
-# Image Processing - Optimized
 Pillow>=10.0.0
-opencv-python-headless>=4.8.0
+
+# Image Processing
 numpy>=1.24.0
+opencv-python-headless>=4.8.0
 
-# Event Loop Optimization (Linux only)
-uvloop>=0.19.0; sys_platform == 'linux'
-
-# Utilities
-python-dotenv>=1.0.0
-
-# Optional: Error tracking
-sentry-sdk>=1.39.0
+# Database (optional)
+asyncpg>=0.28.0
+redis>=5.0.0
