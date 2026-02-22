@@ -1,6 +1,6 @@
 """
-🎯 TRUE OMEGA ULTIMATE - Production-Grade Roblox Scanner Bot
-Optimized for Railway.app deployment
+🎯 TRUE OMEGA ULTIMATE v3.0 - Next-Gen Roblox Scanner
+Fixed whitelist system
 """
 
 import os
@@ -18,33 +18,38 @@ import hashlib
 import logging
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, quote, unquote
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict, deque
 from dataclasses import dataclass, asdict, field
-from typing import Optional, List, Dict, Tuple, Any, Set
-from enum import Enum
+from typing import Optional, List, Dict, Tuple, Any, Set, Callable
+from enum import Enum, auto
+from functools import wraps
+import numpy as np
 
 warnings.filterwarnings('ignore')
 
 # ═══════════════════════════════════════════════════════════
 # LOGGING SETUP
 # ═══════════════════════════════════════════════════════════
-class JSONFormatter(logging.Formatter):
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        'DEBUG': '\033[36m',
+        'INFO': '\033[32m',
+        'WARNING': '\033[33m',
+        'ERROR': '\033[31m',
+        'CRITICAL': '\033[35m',
+        'RESET': '\033[0m'
+    }
+    
     def format(self, record):
-        log_data = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "module": record.module,
-        }
-        if hasattr(record, "extra"):
-            log_data.update(record.extra)
-        return json.dumps(log_data)
+        color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
+        reset = self.COLORS['RESET']
+        record.levelname = f"{color}{record.levelname}{reset}"
+        return super().format(record)
 
 logger = logging.getLogger("true_omega")
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(JSONFormatter())
+handler.setFormatter(ColoredFormatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S'))
 logger.addHandler(handler)
 
 # ═══════════════════════════════════════════════════════════
@@ -52,40 +57,29 @@ logger.addHandler(handler)
 # ═══════════════════════════════════════════════════════════
 class Config:
     TOKEN = os.getenv('DISCORD_TOKEN')
-    OWNER_ID = os.getenv('OWNER_ID', '1382137288502542339')
+    OWNER_ID = str(os.getenv('OWNER_ID', '1382137288502542339'))
     OCR_SPACE_KEY = os.getenv('OCR_SPACE_KEY', '')
     WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
     DATABASE_URL = os.getenv('DATABASE_URL', '')
     REDIS_URL = os.getenv('REDIS_URL', '')
-    SENTRY_DSN = os.getenv('SENTRY_DSN', '')
     
     MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', '52428800'))
-    OCR_TIMEOUT = int(os.getenv('OCR_TIMEOUT', '20'))
-    RATE_LIMIT_PER_MINUTE = int(os.getenv('RATE_LIMIT', '10'))
-    CACHE_TTL = int(os.getenv('CACHE_TTL', '600'))
-
+    OCR_TIMEOUT = int(os.getenv('OCR_TIMEOUT', '15'))
+    RATE_LIMIT_PER_MINUTE = int(os.getenv('RATE_LIMIT', '15'))
+    CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))
+    MAX_WORKERS = int(os.getenv('MAX_WORKERS', '8'))
+    
     @classmethod
     def validate(cls):
         if not cls.TOKEN:
             logger.error("❌ DISCORD_TOKEN not set!")
             sys.exit(1)
-        logger.info("✅ Configuration validated")
+        logger.info(f"✅ Config validated | Owner: {cls.OWNER_ID}")
 
 Config.validate()
 
 # ═══════════════════════════════════════════════════════════
-# SENTRY
-# ═══════════════════════════════════════════════════════════
-if Config.SENTRY_DSN:
-    try:
-        import sentry_sdk
-        sentry_sdk.init(dsn=Config.SENTRY_DSN, traces_sample_rate=0.1, profiles_sample_rate=0.1)
-        logger.info("✅ Sentry initialized")
-    except ImportError:
-        pass
-
-# ═══════════════════════════════════════════════════════════
-# IMPORTS WITH FALLBACKS
+# IMPORTS
 # ═══════════════════════════════════════════════════════════
 import aiohttp
 import discord
@@ -95,42 +89,30 @@ from discord.ui import Button, View, Select
 try:
     import asyncpg
     DB_AVAILABLE = True
-    logger.info("✅ asyncpg available")
 except ImportError:
     DB_AVAILABLE = False
-    logger.warning("⚠️ asyncpg not available")
 
 try:
-    import redis.asyncio as redis
-    REDIS_AVAILABLE = True
-    logger.info("✅ redis available")
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageStat
+    PIL_AVAILABLE = True
 except ImportError:
-    REDIS_AVAILABLE = False
-    logger.warning("⚠️ redis not available")
+    PIL_AVAILABLE = False
 
 try:
     import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-    PIL_AVAILABLE = True
     TESSERACT_AVAILABLE = True
-    logger.info("✅ Tesseract/Pillow available")
 except ImportError:
-    PIL_AVAILABLE = False
     TESSERACT_AVAILABLE = False
-    logger.warning("⚠️ Tesseract/Pillow not available")
 
 try:
     import easyocr
     EASYOCR_AVAILABLE = True
-    logger.info("✅ EasyOCR available")
 except ImportError:
     EASYOCR_AVAILABLE = False
 
 try:
-    import numpy as np
     import cv2
     CV2_AVAILABLE = True
-    logger.info("✅ OpenCV available")
 except ImportError:
     CV2_AVAILABLE = False
 
@@ -139,31 +121,61 @@ try:
     YTDLP_AVAILABLE = True
 except ImportError:
     YTDLP_AVAILABLE = False
-    logger.warning("⚠️ yt-dlp not available")
+
+logger.info(f"🔧 Available: PIL={PIL_AVAILABLE}, Tesseract={TESSERACT_AVAILABLE}, EasyOCR={EASYOCR_AVAILABLE}")
+
+# ═══════════════════════════════════════════════════════════
+# ASYNC CACHE
+# ═══════════════════════════════════════════════════════════
+class AsyncCache:
+    def __init__(self, maxsize: int = 1000, ttl: int = 300):
+        self.cache: Dict[str, Tuple[Any, float]] = {}
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._lock = asyncio.Lock()
+    
+    async def get(self, key: str) -> Optional[Any]:
+        async with self._lock:
+            if key in self.cache:
+                value, expiry = self.cache[key]
+                if time.time() < expiry:
+                    return value
+                del self.cache[key]
+            return None
+    
+    async def set(self, key: str, value: Any, ttl: int = None):
+        ttl = ttl or self.ttl
+        async with self._lock:
+            if len(self.cache) >= self.maxsize:
+                oldest = min(self.cache.items(), key=lambda x: x[1][1])
+                del self.cache[oldest[0]]
+            self.cache[key] = (value, time.time() + ttl)
+    
+    async def delete(self, key: str):
+        async with self._lock:
+            if key in self.cache:
+                del self.cache[key]
 
 # ═══════════════════════════════════════════════════════════
 # DATA CLASSES
 # ═══════════════════════════════════════════════════════════
-class ScanStatus(Enum):
-    SUCCESS = "success"
-    NOT_FOUND = "not_found"
-    ERROR = "error"
-    RATE_LIMITED = "rate_limited"
-    LOW_CONFIDENCE = "low_confidence"
+@dataclass
+class DetectedUser:
+    username: str
+    display_name: Optional[str]
+    confidence: float
+    source: str
+    context: str = ""
 
 @dataclass
 class ScanResult:
-    status: ScanStatus
-    profile: Optional[Dict] = None
-    confidence: float = 0.0
-    reasons: List[str] = field(default_factory=list)
+    success: bool
+    detected_users: List[DetectedUser]
+    verified_profile: Optional[Dict] = None
     alternatives: List[Dict] = field(default_factory=list)
     scan_time: float = 0.0
-    ocr_engines_used: List[str] = field(default_factory=list)
-    cached: bool = False
-    thumbnail_url: Optional[str] = None
-    error_message: Optional[str] = None
-    suggested_usernames: List[str] = field(default_factory=list)
+    engines_used: List[str] = field(default_factory=list)
+    raw_text: str = ""
 
 @dataclass
 class UserStats:
@@ -177,363 +189,174 @@ class UserStats:
     
     @property
     def success_rate(self) -> float:
-        if self.total_scans == 0:
-            return 0.0
-        return (self.successful_scans / self.total_scans) * 100
+        return (self.successful_scans / self.total_scans * 100) if self.total_scans > 0 else 0.0
 
 # ═══════════════════════════════════════════════════════════
-# DATABASE MANAGER
+# SMART PREPROCESSOR
 # ═══════════════════════════════════════════════════════════
-class DatabaseManager:
+class SmartPreprocessor:
     def __init__(self):
-        self.pool: Optional[asyncpg.Pool] = None
-        self.json_file = "bot_data.json"
-        self._memory_cache: Dict[str, Any] = {}
-        
-    async def setup(self):
-        if DB_AVAILABLE and Config.DATABASE_URL:
-            try:
-                self.pool = await asyncpg.create_pool(Config.DATABASE_URL, min_size=2, max_size=10)
-                await self._create_tables()
-                logger.info("✅ PostgreSQL connected")
-            except Exception as e:
-                logger.error(f"❌ PostgreSQL failed: {e}")
-                self._load_json()
-        else:
-            logger.info("📁 Using JSON storage")
-            self._load_json()
+        self.quality_presets = {
+            "low": {"scale": 1, "denoise": False},
+            "medium": {"scale": 2, "denoise": True},
+            "high": {"scale": 3, "denoise": True, "contrast": True},
+        }
     
-    async def _create_tables(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_stats (
-                    user_id TEXT PRIMARY KEY,
-                    total_scans INTEGER DEFAULT 0,
-                    successful_scans INTEGER DEFAULT 0,
-                    failed_scans INTEGER DEFAULT 0,
-                    last_scan TIMESTAMP,
-                    favorite_users JSONB DEFAULT '[]',
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS scan_history (
-                    id SERIAL PRIMARY KEY,
-                    discord_user_id TEXT,
-                    roblox_username TEXT,
-                    roblox_id BIGINT,
-                    confidence FLOAT,
-                    success BOOLEAN,
-                    scanned_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS whitelist (
-                    user_id TEXT PRIMARY KEY,
-                    added_by TEXT,
-                    added_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-    
-    def _load_json(self):
-        try:
-            if os.path.exists(self.json_file):
-                with open(self.json_file, 'r') as f:
-                    self._memory_cache = json.load(f)
-        except:
-            self._memory_cache = {"user_stats": {}, "whitelist": [], "scan_history": []}
-    
-    def _save_json(self):
-        try:
-            with open(self.json_file, 'w') as f:
-                json.dump(self._memory_cache, f, default=str)
-        except Exception as e:
-            logger.error(f"Failed to save JSON: {e}")
-    
-    async def get_user_stats(self, user_id: str) -> UserStats:
-        if self.pool:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT * FROM user_stats WHERE user_id = $1", user_id)
-                if row:
-                    return UserStats(
-                        user_id=row['user_id'],
-                        total_scans=row['total_scans'],
-                        successful_scans=row['successful_scans'],
-                        failed_scans=row['failed_scans'],
-                        last_scan=row['last_scan'],
-                        favorite_users=json.loads(row['favorite_users']) if isinstance(row['favorite_users'], str) else row['favorite_users'],
-                        created_at=row['created_at']
-                    )
-        else:
-            data = self._memory_cache.get("user_stats", {}).get(user_id, {})
-            if data:
-                return UserStats(**data)
-        return UserStats(user_id=user_id)
-    
-    async def update_user_stats(self, stats: UserStats):
-        if self.pool:
-            async with self.pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO user_stats (user_id, total_scans, successful_scans, failed_scans, last_scan, favorite_users)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        total_scans = EXCLUDED.total_scans,
-                        successful_scans = EXCLUDED.successful_scans,
-                        failed_scans = EXCLUDED.failed_scans,
-                        last_scan = EXCLUDED.last_scan,
-                        favorite_users = EXCLUDED.favorite_users
-                """, stats.user_id, stats.total_scans, stats.successful_scans, 
-                     stats.failed_scans, stats.last_scan, json.dumps(stats.favorite_users))
-        else:
-            if "user_stats" not in self._memory_cache:
-                self._memory_cache["user_stats"] = {}
-            self._memory_cache["user_stats"][stats.user_id] = asdict(stats)
-            self._save_json()
-    
-    async def add_scan_history(self, discord_user_id: str, username: str, roblox_id: int, 
-                                confidence: float, success: bool):
-        if self.pool:
-            async with self.pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO scan_history (discord_user_id, roblox_username, roblox_id, confidence, success)
-                    VALUES ($1, $2, $3, $4, $5)
-                """, discord_user_id, username, roblox_id, confidence, success)
-        else:
-            if "scan_history" not in self._memory_cache:
-                self._memory_cache["scan_history"] = []
-            self._memory_cache["scan_history"].append({
-                "discord_user_id": discord_user_id,
-                "roblox_username": username,
-                "roblox_id": roblox_id,
-                "confidence": confidence,
-                "success": success,
-                "scanned_at": datetime.utcnow().isoformat()
-            })
-            self._save_json()
-    
-    async def get_whitelist(self) -> Set[str]:
-        if self.pool:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch("SELECT user_id FROM whitelist")
-                return {row['user_id'] for row in rows}
-        else:
-            return set(self._memory_cache.get("whitelist", []))
-    
-    async def add_to_whitelist(self, user_id: str, added_by: str):
-        if self.pool:
-            async with self.pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO whitelist (user_id, added_by) VALUES ($1, $2)
-                    ON CONFLICT (user_id) DO NOTHING
-                """, user_id, added_by)
-        else:
-            if "whitelist" not in self._memory_cache:
-                self._memory_cache["whitelist"] = []
-            if user_id not in self._memory_cache["whitelist"]:
-                self._memory_cache["whitelist"].append(user_id)
-                self._save_json()
-    
-    async def remove_from_whitelist(self, user_id: str):
-        if self.pool:
-            async with self.pool.acquire() as conn:
-                await conn.execute("DELETE FROM whitelist WHERE user_id = $1", user_id)
-        else:
-            if "whitelist" in self._memory_cache and user_id in self._memory_cache["whitelist"]:
-                self._memory_cache["whitelist"].remove(user_id)
-                self._save_json()
-    
-    async def get_recent_scans(self, user_id: str, limit: int = 10) -> List[Dict]:
-        if self.pool:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch("""
-                    SELECT * FROM scan_history 
-                    WHERE discord_user_id = $1 
-                    ORDER BY scanned_at DESC 
-                    LIMIT $2
-                """, user_id, limit)
-                return [dict(row) for row in rows]
-        else:
-            history = self._memory_cache.get("scan_history", [])
-            user_history = [h for h in history if h.get("discord_user_id") == user_id]
-            return sorted(user_history, key=lambda x: x.get("scanned_at", ""), reverse=True)[:limit]
-
-# ═══════════════════════════════════════════════════════════
-# REDIS CACHE MANAGER
-# ═══════════════════════════════════════════════════════════
-class CacheManager:
-    def __init__(self):
-        self.redis: Optional[redis.Redis] = None
-        self._local_cache: Dict[str, Tuple[Any, float]] = {}
-        
-    async def setup(self):
-        if REDIS_AVAILABLE and Config.REDIS_URL:
-            try:
-                self.redis = redis.from_url(Config.REDIS_URL, decode_responses=True)
-                await self.redis.ping()
-                logger.info("✅ Redis connected")
-            except Exception as e:
-                logger.error(f"❌ Redis failed: {e}")
-        else:
-            logger.info("📁 Using memory cache")
-    
-    async def get(self, key: str) -> Optional[Any]:
-        if self.redis:
-            try:
-                data = await self.redis.get(key)
-                if data:
-                    return json.loads(data)
-            except:
-                pass
-        
-        if key in self._local_cache:
-            value, expiry = self._local_cache[key]
-            if time.time() < expiry:
-                return value
-            del self._local_cache[key]
-        return None
-    
-    async def set(self, key: str, value: Any, ttl: int = None):
-        ttl = ttl or Config.CACHE_TTL
-        if self.redis:
-            try:
-                await self.redis.setex(key, ttl, json.dumps(value, default=str))
-                return
-            except:
-                pass
-        
-        self._local_cache[key] = (value, time.time() + ttl)
-    
-    async def delete(self, key: str):
-        if self.redis:
-            try:
-                await self.redis.delete(key)
-            except:
-                pass
-        if key in self._local_cache:
-            del self._local_cache[key]
-
-# ═══════════════════════════════════════════════════════════
-# OCR PROCESSOR
-# ═══════════════════════════════════════════════════════════
-class OCRProcessor:
-    def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.easyocr_reader = None
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        
-        if EASYOCR_AVAILABLE:
-            try:
-                self.easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                logger.info("✅ EasyOCR initialized")
-            except Exception as e:
-                logger.error(f"⚠️ EasyOCR init failed: {e}")
-    
-    async def setup(self):
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            headers={"User-Agent": "TrueOmegaBot/2.0"}
-        )
-    
-    def preprocess_image(self, image_data: bytes, method: str = "default") -> bytes:
+    def preprocess(self, image_data: bytes, quality: str = "high") -> List[Tuple[str, bytes]]:
         if not PIL_AVAILABLE:
-            return image_data
+            return [("original", image_data)]
         
         try:
             img = Image.open(io.BytesIO(image_data))
-            
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
             w, h = img.size
-            if w < 400 or h < 200:
-                scale = 3
-            elif w < 800 or h < 400:
-                scale = 2
-            else:
-                scale = 1
+            preset = self.quality_presets.get(quality, self.quality_presets["high"])
+            results = [("original", image_data)]
             
-            if scale > 1:
+            # Scale if needed
+            if preset.get("scale", 1) > 1:
+                scale = preset["scale"]
                 img = img.resize((w * scale, h * scale), Image.Resampling.LANCZOS)
             
-            if method == "contrast":
-                img = ImageEnhance.Contrast(img).enhance(2.5)
-                img = ImageEnhance.Sharpness(img).enhance(2.0)
-            elif method == "bw":
-                img = ImageOps.grayscale(img)
-                img = img.point(lambda x: 0 if x < 128 else 255, '1').convert('RGB')
-            elif method == "sharp":
-                img = img.filter(ImageFilter.SHARPEN)
-                img = ImageEnhance.Contrast(img).enhance(2.0)
-            elif method == "invert":
-                img = ImageOps.invert(img)
-                img = ImageEnhance.Contrast(img).enhance(2.0)
-            elif method == "denoise":
-                img = img.filter(ImageFilter.MedianFilter(size=3))
-                img = ImageEnhance.Contrast(img).enhance(1.5)
-            elif method == "default":
-                img = ImageEnhance.Contrast(img).enhance(1.8)
-                img = ImageEnhance.Sharpness(img).enhance(1.5)
+            # High contrast version
+            v1 = img.copy()
+            v1 = ImageEnhance.Contrast(v1).enhance(2.5)
+            v1 = ImageEnhance.Sharpness(v1).enhance(2.0)
+            results.append(("high_contrast", self._to_bytes(v1)))
             
-            buf = io.BytesIO()
-            img.save(buf, format='PNG', optimize=True)
-            return buf.getvalue()
+            # Binary version
+            v2 = img.copy()
+            v2 = ImageOps.grayscale(v2)
+            v2 = v2.point(lambda x: 0 if x < 128 else 255, '1').convert('RGB')
+            results.append(("binary", self._to_bytes(v2)))
+            
+            # Denoised
+            if preset.get("denoise"):
+                v3 = img.copy()
+                v3 = v3.filter(ImageFilter.MedianFilter(size=3))
+                v3 = ImageEnhance.Contrast(v3).enhance(1.5)
+                results.append(("denoised", self._to_bytes(v3)))
+            
+            return results
             
         except Exception as e:
-            logger.error(f"Preprocessing error: {e}")
-            return image_data
+            logger.error(f"Preprocessing failed: {e}")
+            return [("original", image_data)]
     
-    async def ocr_tesseract(self, image_data: bytes) -> Tuple[str, float]:
+    def _to_bytes(self, img: Image.Image) -> bytes:
+        buf = io.BytesIO()
+        img.save(buf, format='PNG', optimize=True)
+        return buf.getvalue()
+
+# ═══════════════════════════════════════════════════════════
+# MULTI-ENGINE OCR
+# ═══════════════════════════════════════════════════════════
+class MultiEngineOCR:
+    def __init__(self):
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.easyocr_reader = None
+        self.preprocessor = SmartPreprocessor()
+        self.executor = __import__('concurrent').futures.ThreadPoolExecutor(max_workers=Config.MAX_WORKERS)
+        
+        if EASYOCR_AVAILABLE:
+            asyncio.create_task(self._init_easyocr())
+    
+    async def _init_easyocr(self):
+        try:
+            self.easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+            logger.info("✅ EasyOCR initialized")
+        except Exception as e:
+            logger.error(f"EasyOCR init failed: {e}")
+    
+    async def setup(self):
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
+            headers={"User-Agent": "TrueOmegaBot/3.0"}
+        )
+    
+    async def scan(self, image_data: bytes, hint: Optional[str] = None) -> ScanResult:
+        start_time = time.time()
+        
+        # Preprocess
+        preprocessed = self.preprocessor.preprocess(image_data)
+        
+        # Run OCR engines in parallel
+        tasks = []
+        
+        # Tesseract on first 3 versions
+        for method, img_data in preprocessed[:3]:
+            tasks.append(self._run_tesseract(img_data, method))
+        
+        # EasyOCR
+        if self.easyocr_reader:
+            tasks.append(self._run_easyocr(preprocessed[0][1]))
+        
+        # OCR.space
+        if Config.OCR_SPACE_KEY:
+            tasks.append(self._run_ocrspace(preprocessed[0][1]))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Fuse results
+        fused_text, engines = self._fuse_results(results)
+        
+        # Extract users
+        detected = self._extract_usernames(fused_text, hint)
+        
+        return ScanResult(
+            success=len(detected) > 0,
+            detected_users=detected,
+            scan_time=time.time() - start_time,
+            engines_used=engines,
+            raw_text=fused_text[:500]
+        )
+    
+    async def _run_tesseract(self, image_data: bytes, method: str) -> Tuple[str, str, float]:
         if not TESSERACT_AVAILABLE:
-            return "", 0.0
+            return "", method, 0.0
         
         try:
-            def run_tesseract():
+            def _tess():
                 img = Image.open(io.BytesIO(image_data))
-                text = pytesseract.image_to_string(img, config='--psm 6')
-                data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-                confidences = [int(c) for c in data['conf'] if int(c) > 0]
-                avg_conf = sum(confidences) / len(confidences) if confidences else 50
-                return text, avg_conf / 100
+                config = '--psm 6 --oem 3'
+                return pytesseract.image_to_string(img, config=config)
             
             loop = asyncio.get_event_loop()
-            return await asyncio.wait_for(
-                loop.run_in_executor(self.executor, run_tesseract),
+            text = await asyncio.wait_for(
+                loop.run_in_executor(self.executor, _tess),
                 timeout=Config.OCR_TIMEOUT
             )
+            return text, f"tesseract_{method}", 0.8 if text else 0.0
+            
         except Exception as e:
-            logger.error(f"Tesseract error: {e}")
-            return "", 0.0
+            return "", method, 0.0
     
-    async def ocr_easyocr(self, image_data: bytes) -> Tuple[str, float]:
+    async def _run_easyocr(self, image_data: bytes) -> Tuple[str, str, float]:
         if not self.easyocr_reader or not CV2_AVAILABLE:
-            return "", 0.0
+            return "", "easyocr", 0.0
         
         try:
-            nparr = np.frombuffer(image_data, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            def run_easyocr():
+            def _easy():
+                nparr = np.frombuffer(image_data, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 results = self.easyocr_reader.readtext(img)
-                texts = []
-                confidences = []
-                for (bbox, text, conf) in results:
-                    texts.append(text)
-                    confidences.append(conf)
-                avg_conf = sum(confidences) / len(confidences) if confidences else 0
-                return '\n'.join(texts), avg_conf
+                return '\n'.join([r[1] for r in results])
             
             loop = asyncio.get_event_loop()
-            return await asyncio.wait_for(
-                loop.run_in_executor(self.executor, run_easyocr),
+            text = await asyncio.wait_for(
+                loop.run_in_executor(self.executor, _easy),
                 timeout=Config.OCR_TIMEOUT
             )
+            return text, "easyocr", 0.9 if text else 0.0
+            
         except Exception as e:
-            logger.error(f"EasyOCR error: {e}")
-            return "", 0.0
+            return "", "easyocr", 0.0
     
-    async def ocr_ocrspace(self, image_data: bytes) -> Tuple[str, float]:
+    async def _run_ocrspace(self, image_data: bytes) -> Tuple[str, str, float]:
         if not Config.OCR_SPACE_KEY:
-            return "", 0.0
+            return "", "ocrspace", 0.0
         
         try:
             b64 = base64.b64encode(image_data).decode()
@@ -541,617 +364,396 @@ class OCRProcessor:
                 'apikey': Config.OCR_SPACE_KEY,
                 'base64Image': f'data:image/png;base64,{b64}',
                 'OCREngine': '2',
-                'scale': 'true',
-                'detectOrientation': 'true',
+                'scale': 'true'
             }
             
             async with self.session.post(
                 'https://api.ocr.space/parse/image',
-                data=data,
-                timeout=aiohttp.ClientTimeout(total=15)
+                data=data
             ) as resp:
                 result = await resp.json()
-                
-                if result.get('OCRExitCode') != 1:
-                    return "", 0.0
-                
-                parsed = result.get('ParsedResults', [{}])[0]
-                text = parsed.get('ParsedText', '')
-                confidence = 0.85 if result.get('OCRExitCode') == 1 else 0.5
-                return text, confidence
+                if result.get('OCRExitCode') == 1:
+                    parsed = result.get('ParsedResults', [{}])[0]
+                    text = parsed.get('ParsedText', '')
+                    return text, "ocrspace", 0.85 if text else 0.0
+                return "", "ocrspace", 0.0
                 
         except Exception as e:
-            logger.error(f"OCR.space error: {e}")
-            return "", 0.0
+            return "", "ocrspace", 0.0
     
-    async def scan(self, image_data: bytes, hint: Optional[str] = None) -> Tuple[str, List[str], float]:
-        start_time = time.time()
+    def _fuse_results(self, results: List) -> Tuple[str, List[str]]:
+        texts = []
+        engines = []
         
-        preprocessed = await asyncio.gather(*[
-            asyncio.get_event_loop().run_in_executor(
-                self.executor, self.preprocess_image, image_data, method
-            )
-            for method in ["default", "contrast", "sharp"]
-        ])
-        
-        tasks = []
-        
-        if TESSERACT_AVAILABLE:
-            tasks.append(self.ocr_tesseract(preprocessed[0]))
-        
-        if EASYOCR_AVAILABLE:
-            tasks.append(self.ocr_easyocr(preprocessed[1]))
-        
-        if Config.OCR_SPACE_KEY:
-            tasks.append(self.ocr_ocrspace(preprocessed[2]))
-        
-        if TESSERACT_AVAILABLE:
-            tasks.append(self.ocr_tesseract(image_data))
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        all_texts = []
-        engines_used = []
-        confidences = []
-        
-        engine_names = ['tesseract', 'easyocr', 'ocrspace', 'tesseract_raw']
-        for i, result in enumerate(results):
+        for result in results:
             if isinstance(result, Exception):
                 continue
-            text, conf = result
+            text, engine, conf = result
             if text and len(text.strip()) > 3:
-                all_texts.append(text)
-                engines_used.append(engine_names[i] if i < len(engine_names) else f"engine_{i}")
-                confidences.append(conf)
+                texts.append(text)
+                engines.append(engine)
         
-        merged_text = self._merge_texts(all_texts)
-        avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+        if not texts:
+            return "", []
         
-        logger.info(f"OCR completed in {time.time() - start_time:.2f}s using {len(engines_used)} engines")
-        
-        return merged_text, engines_used, avg_confidence
-    
-    def _merge_texts(self, texts: List[str]) -> str:
-        seen_lines = set()
-        merged = []
-        
+        # Deduplicate lines
+        seen = set()
+        all_lines = []
         for text in texts:
             for line in text.split('\n'):
-                clean = line.strip()
-                if len(clean) < 2:
-                    continue
-                normalized = re.sub(r'[^\w@]', '', clean).lower()
-                if normalized and normalized not in seen_lines:
-                    seen_lines.add(normalized)
-                    merged.append(clean)
+                clean = re.sub(r'[^\w@]', '', line).lower()
+                if clean and clean not in seen and len(clean) >= 3:
+                    seen.add(clean)
+                    all_lines.append(line)
         
-        return '\n'.join(merged)
+        return '\n'.join(all_lines), engines
+    
+    def _extract_usernames(self, text: str, hint: Optional[str] = None) -> List[DetectedUser]:
+        users = []
+        lines = text.split('\n')
+        
+        # Patterns
+        patterns = [
+            (r'[@＠﹫]([a-z][a-z0-9_]{2,19})\b', 'at_mention', 0.90),
+            (r'roblox\.com/users/(\d+)', 'url_id', 0.98),
+            (r'\b([a-z][a-z0-9_]{2,19})\b', 'standalone', 0.60),
+        ]
+        
+        for i, line in enumerate(lines):
+            for pattern, source, conf in patterns:
+                for match in re.finditer(pattern, line, re.IGNORECASE):
+                    if source == 'url_id':
+                        username = f"ID:{match.group(1)}"
+                    else:
+                        username = match.group(1).lstrip('@')
+                    
+                    if not self._is_valid_username(username):
+                        continue
+                    
+                    # Boost confidence if hint matches
+                    if hint and username.lower() == hint.lower().lstrip('@'):
+                        conf = 1.0
+                        source = 'hint_match'
+                    
+                    users.append(DetectedUser(
+                        username=username,
+                        display_name=None,
+                        confidence=conf,
+                        source=source,
+                        context=line.strip()[:100]
+                    ))
+        
+        # Deduplicate
+        seen = {}
+        for user in sorted(users, key=lambda x: x.confidence, reverse=True):
+            key = user.username.lower()
+            if key not in seen:
+                seen[key] = user
+        
+        return list(seen.values())
+    
+    def _is_valid_username(self, username: str) -> bool:
+        if not username or len(username) < 3 or len(username) > 20:
+            return False
+        
+        exclude = {
+            'roblox', 'profile', 'home', 'games', 'friends', 'inventory',
+            'avatar', 'shop', 'create', 'about', 'chat', 'trade', 'premium',
+            'settings', 'search', 'menu', 'play', 'join', 'exit', 'back',
+            'online', 'offline', 'studio', 'catalog', 'develop', 'groups',
+            'the', 'and', 'for', 'you', 'are', 'user', 'name', 'display'
+        }
+        
+        if username.lower() in exclude:
+            return False
+        
+        if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', username):
+            return False
+        
+        return True
 
 # ═══════════════════════════════════════════════════════════
 # ROBLOX API
 # ═══════════════════════════════════════════════════════════
 class RobloxAPI:
-    def __init__(self, cache: CacheManager):
+    def __init__(self, cache: AsyncCache):
         self.session: Optional[aiohttp.ClientSession] = None
         self.cache = cache
-        self.rate_limit_remaining = 100
-        self.rate_limit_reset = time.time()
-        self._circuit_open = False
-        self._circuit_failures = 0
         
     async def setup(self):
         self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15),
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json"
-            }
+            timeout=aiohttp.ClientTimeout(total=10),
+            headers={"User-Agent": "Mozilla/5.0"}
         )
     
-    async def _check_circuit_breaker(self):
-        if self._circuit_open:
-            if time.time() - self._circuit_failures > 60:
-                self._circuit_open = False
-                self._circuit_failures = 0
-            else:
-                raise Exception("Circuit breaker open")
-    
-    async def _make_request(self, method: str, url: str, **kwargs) -> Dict:
-        await self._check_circuit_breaker()
+    async def verify_users(self, users: List[DetectedUser]) -> List[Dict]:
+        verified = []
         
-        try:
-            async with self.session.request(method, url, **kwargs) as resp:
-                self.rate_limit_remaining = int(resp.headers.get('X-RateLimit-Remaining', 100))
-                
-                if resp.status == 429:
-                    retry_after = int(resp.headers.get('Retry-After', 10))
-                    logger.warning(f"Rate limited, waiting {retry_after}s")
-                    await asyncio.sleep(retry_after)
-                    raise Exception("Rate limited")
-                
-                if resp.status == 200:
-                    self._circuit_failures = max(0, self._circuit_failures - 1)
-                    return await resp.json()
-                elif resp.status == 404:
-                    return None
-                else:
-                    raise Exception(f"HTTP {resp.status}")
-                    
-        except Exception as e:
-            self._circuit_failures += 1
-            if self._circuit_failures > 5:
-                self._circuit_open = True
-            raise
-    
-    async def get_user_by_username(self, username: str) -> Optional[Dict]:
-        cache_key = f"roblox:user:{username.lower()}"
-        cached = await self.cache.get(cache_key)
-        if cached:
-            return cached
+        for user in users[:5]:  # Max 5
+            # Check cache
+            cache_key = f"user:{user.username.lower()}"
+            cached = await self.cache.get(cache_key)
+            
+            if cached:
+                verified.append({
+                    'profile': cached,
+                    'detected': user,
+                    'score': user.confidence,
+                    'cached': True
+                })
+                continue
+            
+            # Fetch from API
+            profile = await self._fetch_user(user.username)
+            if profile:
+                verified.append({
+                    'profile': profile,
+                    'detected': user,
+                    'score': user.confidence,
+                    'cached': False
+                })
+                await self.cache.set(cache_key, profile, ttl=600)
         
+        verified.sort(key=lambda x: x['score'], reverse=True)
+        return verified
+    
+    async def _fetch_user(self, username: str) -> Optional[Dict]:
         try:
-            result = await self._make_request(
-                'POST',
+            # Username lookup
+            async with self.session.post(
                 'https://users.roblox.com/v1/usernames/users',
                 json={"usernames": [username], "excludeBannedUsers": False}
-            )
-            
-            if result and result.get('data'):
-                user_info = result['data'][0]
-                profile = await self.get_user_by_id(user_info['id'])
-                if profile:
-                    await self.cache.set(cache_key, profile, ttl=600)
-                    return profile
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error fetching user {username}: {e}")
-            return None
-    
-    async def get_user_by_id(self, user_id: int) -> Optional[Dict]:
-        cache_key = f"roblox:id:{user_id}"
-        cached = await self.cache.get(cache_key)
-        if cached:
-            return cached
-        
-        try:
-            profile = await self._make_request(
-                'GET',
-                f'https://users.roblox.com/v1/users/{user_id}'
-            )
-            if profile:
-                try:
-                    thumb_resp = await self._make_request(
-                        'GET',
-                        f'https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=150x150&format=Png'
-                    )
-                    if thumb_resp and thumb_resp.get('data'):
-                        profile['thumbnailUrl'] = thumb_resp['data'][0].get('imageUrl')
-                except:
-                    pass
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
                 
-                await self.cache.set(cache_key, profile, ttl=600)
-                return profile
-            return None
-            
+                if not data.get('data'):
+                    return None
+                
+                user_id = data['data'][0]['id']
+                
+                # Get full profile
+                async with self.session.get(
+                    f'https://users.roblox.com/v1/users/{user_id}'
+                ) as resp2:
+                    if resp2.status != 200:
+                        return None
+                    profile = await resp2.json()
+                    
+                    # Get avatar
+                    try:
+                        async with self.session.get(
+                            f'https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=150x150&format=Png'
+                        ) as resp3:
+                            if resp3.status == 200:
+                                thumb = await resp3.json()
+                                if thumb.get('data'):
+                                    profile['thumbnailUrl'] = thumb['data'][0].get('imageUrl')
+                    except:
+                        pass
+                    
+                    return profile
+                    
         except Exception as e:
-            logger.error(f"Error fetching user ID {user_id}: {e}")
+            logger.error(f"Fetch error: {e}")
             return None
     
-    async def search_users(self, keyword: str, limit: int = 5) -> List[Dict]:
+    async def search_similar(self, username: str) -> List[Dict]:
         try:
-            result = await self._make_request(
-                'GET',
-                f'https://users.roblox.com/v1/users/search?keyword={quote(keyword)}&limit={limit}'
-            )
-            return result.get('data', []) if result else []
-        except Exception as e:
-            logger.error(f"Error searching users: {e}")
-            return []
-    
-    async def get_user_groups(self, user_id: int) -> List[Dict]:
-        try:
-            result = await self._make_request(
-                'GET',
-                f'https://groups.roblox.com/v1/users/{user_id}/groups/roles'
-            )
-            return result.get('data', []) if result else []
+            async with self.session.get(
+                f'https://users.roblox.com/v1/users/search?keyword={quote(username)}&limit=5'
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('data', [])
+                return []
         except:
             return []
 
 # ═══════════════════════════════════════════════════════════
-# USERNAME EXTRACTOR
+# DATABASE
 # ═══════════════════════════════════════════════════════════
-class UsernameExtractor:
-    EXCLUDE_WORDS = {
-        'roblox', 'profile', 'home', 'games', 'friends', 'inventory', 
-        'avatar', 'shop', 'create', 'about', 'chat', 'trade', 'premium',
-        'settings', 'search', 'menu', 'play', 'join', 'exit', 'back',
-        'online', 'offline', 'studio', 'catalog', 'develop', 'groups',
-        'messages', 'notifications', 'the', 'and', 'for', 'you', 'are',
-        'connection', 'match', 'confidence', 'verification', 'status',
-        'created', 'user', 'id', 'about', 'other', 'matches', 'banned',
-        'active', 'today', 'font', 'proof', 'scanning', 'omega', 'true',
-        'display', 'username', 'scan', 'click', 'add', 'remove', 'cancel',
-        'confirm', 'save', 'edit', 'delete', 'report', 'block', 'follow',
-        'following', 'followers', 'friends', 'friend', 'unfriend',
-        'accept', 'decline', 'pending', 'request', 'sent', 'received',
-        'all', 'new', 'old', 'recent', 'popular', 'trending', 'recommended',
-        'sponsored', 'advertisement', 'ad', 'promoted', 'featured'
-    }
-    
-    USERNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_]{3,20}$')
-    
-    AT_PATTERNS = [
-        re.compile(r'[@＠﹫]([a-zA-Z0-9_]{3,20})\b'),
-        re.compile(r'\bat\s+([a-zA-Z0-9_]{3,20})\b', re.I),
-    ]
-    
-    URL_PATTERNS = [
-        re.compile(r'roblox\.com/users/(\d+)', re.I),
-        re.compile(r'roblox\.com/user\.aspx\?id=(\d+)', re.I),
-    ]
-    
-    def extract(self, text: str, hint: Optional[str] = None) -> List[Dict]:
-        candidates = []
-        lines = text.split('\n')
-        text_lower = text.lower()
-        
-        for i, line in enumerate(lines):
-            for pattern in self.AT_PATTERNS:
-                for match in pattern.finditer(line):
-                    username = match.group(1)
-                    if self._is_valid_username(username):
-                        display_name = None
-                        confidence = 0.85
-                        
-                        before = line[:match.start()].strip()
-                        before_clean = re.sub(r'[^\w\s]', '', before).strip()
-                        if before_clean and len(before_clean) < 25:
-                            display_name = before_clean
-                            confidence = 0.95
-                        
-                        if not display_name and i > 0:
-                            prev = re.sub(r'[^\w\s]', '', lines[i-1]).strip()
-                            if prev and len(prev) < 25:
-                                display_name = prev
-                                confidence = 0.9
-                        
-                        candidates.append({
-                            'username': username,
-                            'display_name': display_name,
-                            'confidence': confidence,
-                            'source': '@mention',
-                            'line': i
-                        })
-        
-        for pattern in self.URL_PATTERNS:
-            for match in pattern.finditer(text):
-                user_id = match.group(1)
-                candidates.insert(0, {
-                    'username': f'ID:{user_id}',
-                    'user_id': int(user_id),
-                    'confidence': 0.98,
-                    'source': 'url'
-                })
-        
-        for line in lines:
-            match = re.search(r'^([A-Z][a-zA-Z\s]{1,20})\s*[@\s]\s*([a-z][a-z0-9_]{2,19})\b', line)
-            if match:
-                display, username = match.groups()
-                if self._is_valid_username(username):
-                    existing = next((c for c in candidates if c['username'].lower() == username.lower()), None)
-                    if existing:
-                        existing['display_name'] = display
-                        existing['confidence'] = 0.98
-                        existing['source'] = 'display_pair'
-                    else:
-                        candidates.append({
-                            'username': username,
-                            'display_name': display,
-                            'confidence': 0.98,
-                            'source': 'display_pair'
-                        })
-        
-        words = set(re.findall(r'\b([a-z][a-z0-9_]{2,19})\b', text_lower))
-        for word in words:
-            if self._is_valid_username(word) and not any(c['username'].lower() == word for c in candidates):
-                near_at = any(f'@{word}' in text_lower or f'@ {word}' in text_lower for _ in [1])
-                confidence = 0.65 if near_at else 0.45
-                candidates.append({
-                    'username': word,
-                    'display_name': None,
-                    'confidence': confidence,
-                    'source': 'pattern'
-                })
-        
-        if hint:
-            hint_clean = hint.strip().lower().replace('@', '')
-            if self._is_valid_username(hint_clean):
-                existing = next((c for c in candidates if c['username'].lower() == hint_clean), None)
-                if existing:
-                    existing['confidence'] = 1.0
-                    existing['source'] = 'hint'
-                else:
-                    candidates.insert(0, {
-                        'username': hint_clean,
-                        'display_name': None,
-                        'confidence': 1.0,
-                        'source': 'hint'
-                    })
-        
-        seen = set()
-        unique = []
-        for c in sorted(candidates, key=lambda x: x['confidence'], reverse=True):
-            key = c['username'].lower()
-            if key not in seen:
-                seen.add(key)
-                unique.append(c)
-        
-        return unique
-    
-    def _is_valid_username(self, username: str) -> bool:
-        if not username:
-            return False
-        if username.lower() in self.EXCLUDE_WORDS:
-            return False
-        if not self.USERNAME_PATTERN.match(username):
-            return False
-        return True
-
-# ═══════════════════════════════════════════════════════════
-# RATE LIMITER
-# ═══════════════════════════════════════════════════════════
-class RateLimiter:
+class DatabaseManager:
     def __init__(self):
-        self._requests: Dict[str, List[float]] = {}
-        self.limit = Config.RATE_LIMIT_PER_MINUTE
-        self.window = 60
-    
-    def is_allowed(self, user_id: str) -> Tuple[bool, int]:
-        now = time.time()
+        self.pool: Optional[asyncpg.Pool] = None
+        self.json_path = "data"
+        self._whitelist: Set[str] = set()
+        os.makedirs(self.json_path, exist_ok=True)
         
-        if user_id not in self._requests:
-            self._requests[user_id] = []
-        
-        self._requests[user_id] = [t for t in self._requests[user_id] if now - t < self.window]
-        
-        if len(self._requests[user_id]) >= self.limit:
-            retry_after = int(self.window - (now - self._requests[user_id][0]))
-            return False, retry_after
-        
-        self._requests[user_id].append(now)
-        return True, 0
-    
-    def get_remaining(self, user_id: str) -> int:
-        if user_id not in self._requests:
-            return self.limit
-        now = time.time()
-        valid = [t for t in self._requests[user_id] if now - t < self.window]
-        return max(0, self.limit - len(valid))
-
-# ═══════════════════════════════════════════════════════════
-# WEBHOOK LOGGER
-# ═══════════════════════════════════════════════════════════
-class WebhookLogger:
-    def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.queue: List[Dict] = []
-        self._flush_task: Optional[asyncio.Task] = None
-    
     async def setup(self):
-        if Config.WEBHOOK_URL:
-            self.session = aiohttp.ClientSession()
-            self._flush_task = asyncio.create_task(self._flush_loop())
-            logger.info("✅ Webhook logger initialized")
-    
-    async def _flush_loop(self):
-        while True:
-            await asyncio.sleep(5)
-            if self.queue:
-                await self._send_batch()
-    
-    async def _send_batch(self):
-        if not self.queue or not self.session:
-            return
-        
-        batch = self.queue[:10]
-        self.queue = self.queue[10:]
-        
-        for item in batch:
+        if DB_AVAILABLE and Config.DATABASE_URL:
             try:
-                async with self.session.post(Config.WEBHOOK_URL, json=item) as resp:
-                    if resp.status not in [200, 204]:
-                        logger.warning(f"Webhook failed: {resp.status}")
+                self.pool = await asyncpg.create_pool(
+                    Config.DATABASE_URL,
+                    min_size=2, max_size=10
+                )
+                await self._init_tables()
+                logger.info("✅ PostgreSQL connected")
             except Exception as e:
-                logger.error(f"Webhook error: {e}")
+                logger.error(f"❌ PostgreSQL failed: {e}")
+        
+        # Load whitelist from file/DB
+        await self._load_whitelist()
     
-    async def log_scan(self, user: discord.User, profile: Dict, confidence: float, 
-                       guild_name: str, scan_time: float):
-        if not Config.WEBHOOK_URL:
-            return
-        
-        embed = {
-            "title": f"🔍 Scan: @{profile['name']}",
-            "description": f"**User:** {user.name} (`{user.id}`)\n**Location:** {guild_name}\n**Confidence:** `{confidence:.0%}`\n**Time:** `{scan_time:.1f}s`",
-            "color": 0x00D4AA if confidence > 0.8 else 0xFFA500,
-            "timestamp": datetime.utcnow().isoformat(),
-            "fields": [
-                {"name": "🆔 Roblox ID", "value": f"`{profile['id']}`", "inline": True},
-                {"name": "📛 Display", "value": profile.get('displayName', 'N/A'), "inline": True}
-            ]
-        }
-        
-        self.queue.append({
-            "username": "TRUE OMEGA",
-            "avatar_url": "https://cdn.discordapp.com/embed/avatars/0.png",
-            "embeds": [embed]
-        })
-        
-        if len(self.queue) >= 5:
-            await self._send_batch()
+    async def _init_tables(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS whitelist (
+                    user_id TEXT PRIMARY KEY,
+                    added_by TEXT,
+                    added_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_stats (
+                    user_id TEXT PRIMARY KEY,
+                    data JSONB DEFAULT '{}',
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
     
-    async def log_error(self, error: str, context: Dict = None):
-        if not Config.WEBHOOK_URL:
-            return
+    async def _load_whitelist(self):
+        """Load whitelist from database or JSON"""
+        self._whitelist = {Config.OWNER_ID}  # Always include owner
         
-        self.queue.append({
-            "username": "TRUE OMEGA - Errors",
-            "content": f"❌ **Error:** {error}\n```json\n{json.dumps(context or {}, default=str, indent=2)[:1500]}\n```"
-        })
-
-# ═══════════════════════════════════════════════════════════
-# VIDEO DOWNLOADER
-# ═══════════════════════════════════════════════════════════
-class VideoDownloader:
-    def __init__(self):
-        self.path = tempfile.mkdtemp()
-    
-    async def download(self, url: str, user_id: str) -> Dict:
-        if not YTDLP_AVAILABLE:
-            return {"success": False, "error": "yt-dlp not installed"}
+        if self.pool:
+            try:
+                async with self.pool.acquire() as conn:
+                    rows = await conn.fetch("SELECT user_id FROM whitelist")
+                    for row in rows:
+                        self._whitelist.add(str(row['user_id']))
+                logger.info(f"✅ Loaded {len(self._whitelist)} whitelisted users from DB")
+            except Exception as e:
+                logger.error(f"DB whitelist load failed: {e}")
         
-        dl_id = f"{user_id}_{int(time.time())}"
-        output = os.path.join(self.path, f"{dl_id}.%(ext)s")
-        
+        # Also try JSON backup
         try:
-            loop = asyncio.get_event_loop()
-            
-            def dl():
-                opts = {
-                    'format': 'best[filesize<25M]/bestvideo[filesize<25M]+bestaudio/best',
-                    'outtmpl': output,
-                    'quiet': True,
-                    'max_filesize': 25 * 1024 * 1024,
-                    'merge_output_format': 'mp4',
-                    'postprocessors': [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}],
-                }
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    files = [f for f in os.listdir(self.path) if f.startswith(dl_id)]
-                    if not files:
-                        return {"success": False, "error": "No file downloaded"}
-                    fpath = os.path.join(self.path, files[0])
-                    return {
-                        "success": True,
-                        "file_path": fpath,
-                        "title": info.get('title', 'video'),
-                        "size": os.path.getsize(fpath),
-                        "duration": info.get('duration'),
-                        "uploader": info.get('uploader')
-                    }
-            
-            return await asyncio.wait_for(loop.run_in_executor(None, dl), timeout=120)
-            
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return {"success": False, "error": str(e)[:200]}
-    
-    def cleanup(self, path: str):
-        try:
+            path = os.path.join(self.json_path, "whitelist.json")
             if os.path.exists(path):
-                os.remove(path)
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    self._whitelist.update(str(u) for u in data.get('users', []))
+                logger.info(f"✅ Loaded whitelist from JSON, total: {len(self._whitelist)}")
+        except Exception as e:
+            logger.error(f"JSON whitelist load failed: {e}")
+    
+    async def add_to_whitelist(self, user_id: str, added_by: str) -> bool:
+        user_id = str(user_id)
+        if user_id in self._whitelist:
+            return False
+        
+        self._whitelist.add(user_id)
+        
+        if self.pool:
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute("""
+                        INSERT INTO whitelist (user_id, added_by) VALUES ($1, $2)
+                        ON CONFLICT (user_id) DO NOTHING
+                    """, user_id, added_by)
+            except Exception as e:
+                logger.error(f"DB whitelist add failed: {e}")
+        
+        # Always save to JSON as backup
+        try:
+            path = os.path.join(self.json_path, "whitelist.json")
+            data = {'users': list(self._whitelist)}
+            with open(path, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.error(f"JSON whitelist save failed: {e}")
+        
+        return True
+    
+    async def remove_from_whitelist(self, user_id: str) -> bool:
+        user_id = str(user_id)
+        if user_id not in self._whitelist or user_id == Config.OWNER_ID:
+            return False
+        
+        self._whitelist.discard(user_id)
+        
+        if self.pool:
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM whitelist WHERE user_id = $1", user_id)
+            except Exception as e:
+                logger.error(f"DB whitelist remove failed: {e}")
+        
+        # Update JSON
+        try:
+            path = os.path.join(self.json_path, "whitelist.json")
+            data = {'users': list(self._whitelist)}
+            with open(path, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.error(f"JSON whitelist save failed: {e}")
+        
+        return True
+    
+    def is_whitelisted(self, user_id: str) -> bool:
+        return str(user_id) in self._whitelist
+    
+    def get_whitelist(self) -> Set[str]:
+        return self._whitelist.copy()
+    
+    async def get_user_stats(self, user_id: str) -> UserStats:
+        if self.pool:
+            try:
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT data FROM user_stats WHERE user_id = $1", user_id
+                    )
+                    if row:
+                        data = json.loads(row['data']) if isinstance(row['data'], str) else row['data']
+                        return UserStats(user_id=user_id, **data)
+            except Exception as e:
+                logger.error(f"DB stats error: {e}")
+        
+        # JSON fallback
+        try:
+            path = os.path.join(self.json_path, f"{user_id}.json")
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    return UserStats(user_id=user_id, **data)
         except:
             pass
+        
+        return UserStats(user_id=user_id)
+    
+    async def save_user_stats(self, stats: UserStats):
+        data = {
+            'total_scans': stats.total_scans,
+            'successful_scans': stats.successful_scans,
+            'failed_scans': stats.failed_scans,
+            'last_scan': stats.last_scan.isoformat() if stats.last_scan else None,
+            'favorite_users': stats.favorite_users
+        }
+        
+        if self.pool:
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute("""
+                        INSERT INTO user_stats (user_id, data, updated_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            data = EXCLUDED.data,
+                            updated_at = NOW()
+                    """, stats.user_id, json.dumps(data))
+            except Exception as e:
+                logger.error(f"DB save error: {e}")
+        
+        # JSON backup
+        try:
+            path = os.path.join(self.json_path, f"{stats.user_id}.json")
+            with open(path, 'w') as f:
+                json.dump(data, f, default=str)
+        except Exception as e:
+            logger.error(f"JSON save error: {e}")
 
 # ═══════════════════════════════════════════════════════════
-# DISCORD UI COMPONENTS - FIXED PROFILE VIEW
-# ═══════════════════════════════════════════════════════════
-class ProfileView(View):
-    def __init__(self, profile: Dict, bot: 'TrueOmegaBot', user_id: str):
-        super().__init__(timeout=180)
-        self.profile = profile
-        self.bot = bot
-        self.user_id = user_id
-        
-        # Add link button with URL in constructor
-        profile_url = f"https://roblox.com/users/{profile['id']}/profile"
-        self.add_item(discord.ui.Button(
-            label="View Profile",
-            style=discord.ButtonStyle.link,
-            emoji="🔗",
-            url=profile_url
-        ))
-    
-    @discord.ui.button(label="Search Groups", style=discord.ButtonStyle.secondary, emoji="👥")
-    async def search_groups(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
-        
-        groups = await self.bot.roblox_api.get_user_groups(self.profile['id'])
-        
-        if not groups:
-            await interaction.followup.send("No groups found or user has private groups.", ephemeral=True)
-            return
-        
-        embed = discord.Embed(
-            title=f"👥 {self.profile.get('displayName', self.profile['name'])}'s Groups",
-            color=0x00D4AA
-        )
-        
-        for group in groups[:10]:
-            g = group.get('group', {})
-            role = group.get('role', {}).get('name', 'Member')
-            embed.add_field(
-                name=g.get('name', 'Unknown'),
-                value=f"Role: {role}\n[View Group](https://roblox.com/groups/{g.get('id')})",
-                inline=True
-            )
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    
-    @discord.ui.button(label="Save to Favorites", style=discord.ButtonStyle.success, emoji="⭐")
-    async def save_favorite(self, interaction: discord.Interaction, button: Button):
-        stats = await self.bot.db.get_user_stats(self.user_id)
-        
-        if self.profile['name'] in stats.favorite_users:
-            await interaction.response.send_message("Already in favorites!", ephemeral=True)
-            return
-        
-        stats.favorite_users.insert(0, self.profile['name'])
-        stats.favorite_users = stats.favorite_users[:10]
-        await self.bot.db.update_user_stats(stats)
-        
-        await interaction.response.send_message(f"Added @{self.profile['name']} to favorites!", ephemeral=True)
-
-class AlternativeSelect(Select):
-    def __init__(self, alternatives: List[Dict], bot: 'TrueOmegaBot'):
-        self.bot = bot
-        options = []
-        
-        for alt in alternatives[:5]:
-            p = alt['profile']
-            label = f"@{p['name']}"
-            description = f"Confidence: {alt['score']:.0%}"
-            if p.get('displayName'):
-                label = f"{p['displayName']} (@{p['name']})"
-            options.append(discord.SelectOption(
-                label=label[:100],
-                description=description[:100],
-                value=p['name']
-            ))
-        
-        super().__init__(
-            placeholder="Select an alternative match...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        
-        username = self.values[0]
-        profile = await self.bot.roblox_api.get_user_by_username(username)
-        
-        if profile:
-            embed = self.bot._create_profile_embed(profile, 0.85, ["Manual selection"])
-            view = ProfileView(profile, self.bot, str(interaction.user.id))
-            await interaction.edit_original_response(embed=embed, view=view)
-        else:
-            await interaction.followup.send("Failed to load profile.", ephemeral=True)
-
-# ═══════════════════════════════════════════════════════════
-# MAIN BOT CLASS
+# DISCORD BOT
 # ═══════════════════════════════════════════════════════════
 class TrueOmegaBot(discord.Client):
     def __init__(self):
@@ -1165,109 +767,80 @@ class TrueOmegaBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         
         self.db = DatabaseManager()
-        self.cache = CacheManager()
-        self.ocr = OCRProcessor()
-        self.roblox_api = RobloxAPI(self.cache)
-        self.extractor = UsernameExtractor()
-        self.rate_limiter = RateLimiter()
-        self.webhook = WebhookLogger()
-        self.downloader = VideoDownloader()
+        self.cache = AsyncCache(maxsize=2000, ttl=300)
+        self.ocr = MultiEngineOCR()
+        self.roblox = RobloxAPI(self.cache)
         
-        self.whitelist: Set[str] = set()
-        self.start_time = time.time()
-        self._shutting_down = False
+        self.user_cooldowns: Dict[str, float] = {}
+        self.cooldown_seconds = 60.0 / Config.RATE_LIMIT_PER_MINUTE
         
     async def setup_hook(self):
-        logger.info("🔧 Setting up bot components...")
+        logger.info("🔧 Initializing...")
         
         await self.db.setup()
-        await self.cache.setup()
         await self.ocr.setup()
-        await self.roblox_api.setup()
-        await self.webhook.setup()
-        
-        self.whitelist = await self.db.get_whitelist()
-        self.whitelist.add(str(Config.OWNER_ID))
-        logger.info(f"✅ Loaded {len(self.whitelist)} whitelisted users")
+        await self.roblox.setup()
         
         self._register_commands()
         await self._sync_commands()
         
-        logger.info("✅ Bot setup complete!")
+        logger.info(f"✅ Bot ready! Whitelisted: {len(self.db.get_whitelist())} users")
     
     def _register_commands(self):
         @self.tree.command(name="scan", description="🔍 Scan Roblox username from image")
+        @app_commands.describe(image="Screenshot to scan", hint="Optional username hint")
         @app_commands.default_permissions()
-        @app_commands.describe(
-            image="Screenshot to scan",
-            hint="Optional username hint (improves accuracy)"
-        )
         async def scan_cmd(interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
-            await self.cmd_scan(interaction, image, hint)
-        
-        @self.tree.command(name="search", description="🔎 Search Roblox user by username")
-        @app_commands.default_permissions()
-        @app_commands.describe(username="Roblox username to search")
-        async def search_cmd(interaction: discord.Interaction, username: str):
-            await self.cmd_search(interaction, username)
-        
-        @self.tree.command(name="download", description="📥 Download video to MP4")
-        @app_commands.default_permissions()
-        @app_commands.describe(url="Video URL (YouTube, TikTok, etc.)")
-        async def download_cmd(interaction: discord.Interaction, url: str):
-            await self.cmd_download(interaction, url)
-        
-        @self.tree.command(name="stats", description="📊 View your scan statistics")
-        @app_commands.default_permissions()
-        async def stats_cmd(interaction: discord.Interaction):
-            await self.cmd_stats(interaction)
-        
-        @self.tree.command(name="history", description="📜 View your recent scans")
-        @app_commands.default_permissions()
-        async def history_cmd(interaction: discord.Interaction):
-            await self.cmd_history(interaction)
+            await self._handle_scan(interaction, image, hint)
         
         @self.tree.command(name="whitelist", description="⚙️ Manage whitelist (Owner only)")
+        @app_commands.describe(user="User ID to add/remove")
         @app_commands.default_permissions()
-        @app_commands.describe(user="User to add/remove (ID or mention)")
         async def whitelist_cmd(interaction: discord.Interaction, user: str):
-            await self.cmd_whitelist(interaction, user)
+            await self._handle_whitelist(interaction, user)
         
-        @self.tree.command(name="help", description="❓ Show bot help and commands")
+        @self.tree.command(name="search", description="🔎 Search Roblox user")
+        @app_commands.describe(username="Username to search")
         @app_commands.default_permissions()
-        async def help_cmd(interaction: discord.Interaction):
-            await self.cmd_help(interaction)
+        async def search_cmd(interaction: discord.Interaction, username: str):
+            await self._handle_search(interaction, username)
         
-        @self.tree.command(name="ping", description="🏓 Check bot latency")
+        @self.tree.command(name="stats", description="📊 Your statistics")
+        @app_commands.default_permissions()
+        async def stats_cmd(interaction: discord.Interaction):
+            await self._handle_stats(interaction)
+        
+        @self.tree.command(name="ping", description="🏓 Bot status")
         @app_commands.default_permissions()
         async def ping_cmd(interaction: discord.Interaction):
-            await self.cmd_ping(interaction)
+            await self._handle_ping(interaction)
+        
+        @self.tree.command(name="help", description="❓ Help")
+        @app_commands.default_permissions()
+        async def help_cmd(interaction: discord.Interaction):
+            await self._handle_help(interaction)
     
     async def _sync_commands(self):
-        logger.info("🔄 Syncing commands...")
-        
-        for attempt in range(5):
+        for attempt in range(3):
             try:
                 synced = await self.tree.sync()
                 logger.info(f"✅ Synced {len(synced)} commands")
-                
-                for cmd in synced:
-                    logger.info(f"  - /{cmd.name}")
-                break
-                
+                return
             except discord.HTTPException as e:
                 if e.status == 429:
-                    retry = getattr(e, 'retry_after', 5)
-                    logger.warning(f"Rate limited, retrying in {retry}s...")
-                    await asyncio.sleep(retry)
+                    await asyncio.sleep(5)
                 else:
-                    logger.error(f"Command sync failed: {e}")
-                    await asyncio.sleep(2)
+                    raise
     
-    async def cmd_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: Optional[str]):
+    async def _check_whitelist(self, user_id: str) -> bool:
+        """Check if user is whitelisted"""
+        return self.db.is_whitelisted(user_id)
+    
+    async def _handle_scan(self, interaction: discord.Interaction, image: discord.Attachment, hint: str = None):
         user_id = str(interaction.user.id)
         
-        if user_id not in self.whitelist:
+        # Check whitelist
+        if not await self._check_whitelist(user_id):
             await interaction.response.send_message(
                 embed=discord.Embed(
                     title="⛔ Access Denied",
@@ -1278,144 +851,86 @@ class TrueOmegaBot(discord.Client):
             )
             return
         
-        allowed, retry_after = self.rate_limiter.is_allowed(user_id)
-        if not allowed:
+        # Check cooldown
+        now = time.time()
+        if user_id in self.user_cooldowns and now < self.user_cooldowns[user_id]:
+            remaining = int(self.user_cooldowns[user_id] - now)
             await interaction.response.send_message(
                 embed=discord.Embed(
-                    title="⏰ Rate Limited",
-                    description=f"Please wait {retry_after}s before scanning again.",
+                    title="⏰ Cooldown",
+                    description=f"Wait {remaining}s",
                     color=0xFFA500
                 ),
                 ephemeral=True
             )
             return
         
-        if image.size and image.size > Config.MAX_FILE_SIZE:
+        self.user_cooldowns[user_id] = now + self.cooldown_seconds
+        
+        # Validate image
+        if image.size > Config.MAX_FILE_SIZE:
             await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="❌ File Too Large",
-                    description=f"Max size: {Config.MAX_FILE_SIZE / 1024 / 1024:.0f}MB",
-                    color=0xFF0000
-                ),
+                embed=discord.Embed(title="❌ File Too Large", color=0xFF0000),
                 ephemeral=True
             )
             return
         
-        # FASTER: Defer immediately without progress message, edit later
         await interaction.response.defer(thinking=True)
         
         try:
-            start_time = time.time()
+            # Download
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image.url, timeout=10) as resp:
+                    if resp.status != 200:
+                        raise Exception("Download failed")
+                    img_data = await resp.read()
             
-            # Download and OCR in parallel with timeout
-            async with self.ocr.session.get(image.url, timeout=15) as resp:
-                if resp.status != 200:
-                    raise Exception(f"Failed to download image: {resp.status}")
-                img_data = await resp.read()
+            # OCR
+            result = await self.ocr.scan(img_data, hint)
             
-            # Run OCR
-            ocr_text, engines_used, ocr_confidence = await self.ocr.scan(img_data, hint)
-            
-            if not ocr_text:
-                raise Exception("No text detected in image")
-            
-            candidates = self.extractor.extract(ocr_text, hint)
-            
-            if not candidates:
-                fail_embed = discord.Embed(
+            if not result.success:
+                embed = discord.Embed(
                     title="❌ No Username Found",
-                    description="Couldn't detect a valid Roblox username in this image.",
-                    color=0xFF0000
+                    description="Could not detect a valid Roblox username.",
+                    color=0xFF6B6B
                 )
-                fail_embed.add_field(
-                    name="💡 Tips",
-                    value="• Make sure the @username is clearly visible\n"
-                          "• Try a higher resolution screenshot\n"
-                          "• Use the `hint` option with the username",
-                    inline=False
-                )
-                fail_embed.add_field(
-                    name="📝 Detected Text (preview)",
-                    value=f"```{ocr_text[:500]}...```" if len(ocr_text) > 500 else f"```{ocr_text}```",
-                    inline=False
-                )
-                fail_embed.set_footer(text=f"OCR engines: {', '.join(engines_used)} | Time: {time.time()-start_time:.1f}s")
-                await interaction.followup.send(embed=fail_embed)
-                
-                stats = await self.db.get_user_stats(user_id)
-                stats.total_scans += 1
-                stats.failed_scans += 1
-                stats.last_scan = datetime.utcnow()
-                await self.db.update_user_stats(stats)
+                if result.raw_text:
+                    embed.add_field(name="Detected Text", value=f"```{result.raw_text[:300]}```", inline=False)
+                await interaction.followup.send(embed=embed)
                 return
             
-            # Verify candidates
-            verified_profiles = []
-            for candidate in candidates[:5]:
-                if candidate['username'].startswith('ID:'):
-                    user_id_num = int(candidate['username'].replace('ID:', ''))
-                    profile = await self.roblox_api.get_user_by_id(user_id_num)
-                else:
-                    profile = await self.roblox_api.get_user_by_username(candidate['username'])
-                
-                if profile:
-                    score = candidate['confidence']
-                    reasons = [f"{candidate['source']} ({candidate['confidence']:.0%})"]
-                    
-                    if candidate.get('display_name') and profile.get('displayName'):
-                        if candidate['display_name'].lower() in profile['displayName'].lower():
-                            score = min(score + 0.1, 1.0)
-                            reasons.append("display match")
-                    
-                    verified_profiles.append({
-                        'profile': profile,
-                        'score': score,
-                        'reasons': reasons,
-                        'cached': False
-                    })
-                    
-                    if score >= 0.95:
-                        break
+            # Verify
+            verified = await self.roblox.verify_users(result.detected_users)
             
-            if not verified_profiles:
-                if candidates:
-                    similar = await self.roblox_api.search_users(candidates[0]['username'], limit=3)
-                    if similar:
-                        suggested = [s['name'] for s in similar]
-                        
-                        fail_embed = discord.Embed(
-                            title="❌ User Not Found",
-                            description=f"Username `@{candidates[0]['username']}` doesn't exist.",
-                            color=0xFF0000
-                        )
-                        fail_embed.add_field(
-                            name="🔍 Did you mean?",
-                            value="\n".join(f"• @{s}" for s in suggested[:3]),
-                            inline=False
-                        )
-                        await interaction.followup.send(embed=fail_embed)
-                        
-                        stats = await self.db.get_user_stats(user_id)
-                        stats.total_scans += 1
-                        stats.failed_scans += 1
-                        await self.db.update_user_stats(stats)
-                        return
+            if not verified:
+                embed = discord.Embed(
+                    title="❌ User Not Found",
+                    description=f"`@{result.detected_users[0].username}` doesn't exist.",
+                    color=0xFF6B6B
+                )
+                # Search similar
+                similar = await self.roblox.search_similar(result.detected_users[0].username)
+                if similar:
+                    embed.add_field(
+                        name="Did you mean?",
+                        value="\n".join(f"• @{s['name']}" for s in similar[:3]),
+                        inline=False
+                    )
+                await interaction.followup.send(embed=embed)
+                return
             
-            best = verified_profiles[0]
+            # Success
+            best = verified[0]
             profile = best['profile']
-            score = best['score']
+            detected = best['detected']
             
-            embed = self._create_profile_embed(profile, score, best['reasons'])
+            embed = self._create_embed(profile, detected, result.scan_time, best['score'])
             embed.set_image(url=image.url)
             
-            view = ProfileView(profile, self, user_id)
-            
-            if len(verified_profiles) > 1:
-                alt_select = AlternativeSelect(verified_profiles[1:], self)
-                view.add_item(alt_select)
-            
+            view = ResultView(profile, self, user_id)
             await interaction.followup.send(embed=embed, view=view)
             
+            # Save stats
             stats = await self.db.get_user_stats(user_id)
             stats.total_scans += 1
             stats.successful_scans += 1
@@ -1423,41 +938,25 @@ class TrueOmegaBot(discord.Client):
                 stats.favorite_users.insert(0, profile['name'])
                 stats.favorite_users = stats.favorite_users[:10]
             stats.last_scan = datetime.utcnow()
-            await self.db.update_user_stats(stats)
-            
-            await self.db.add_scan_history(user_id, profile['name'], profile['id'], score, True)
-            
-            guild_name = interaction.guild.name if interaction.guild else "DM"
-            await self.webhook.log_scan(interaction.user, profile, score, guild_name, time.time() - start_time)
+            await self.db.save_user_stats(stats)
             
         except Exception as e:
             logger.error(f"Scan error: {e}")
-            traceback.print_exc()
-            
-            error_embed = discord.Embed(
-                title="❌ Scan Failed",
-                description=f"An error occurred: `{str(e)[:200]}`\n\nPlease try again.",
-                color=0xFF0000
+            await interaction.followup.send(
+                embed=discord.Embed(title="❌ Error", description=str(e)[:200], color=0xFF0000)
             )
-            await interaction.followup.send(embed=error_embed)
-            
-            try:
-                stats = await self.db.get_user_stats(user_id)
-                stats.total_scans += 1
-                stats.failed_scans += 1
-                await self.db.update_user_stats(stats)
-            except:
-                pass
     
-    def _create_profile_embed(self, profile: Dict, score: float, reasons: List[str]) -> discord.Embed:
+    def _create_embed(self, profile: Dict, detected: DetectedUser, scan_time: float, score: float) -> discord.Embed:
         if profile.get('isBanned'):
-            color, status = 0x8B0000, "🔴 BANNED"
-        elif score >= 0.9:
-            color, status = 0x00FF00, "✅ Verified"
-        elif score >= 0.7:
-            color, status = 0xFFA500, "⚠️ Likely"
+            color, status = 0xFF0000, "🔴 BANNED"
+        elif score >= 0.95:
+            color, status = 0x00FF00, "✅ CERTAIN"
+        elif score >= 0.80:
+            color, status = 0x55FF55, "✓ HIGH"
+        elif score >= 0.60:
+            color, status = 0xFFAA00, "⚠ MEDIUM"
         else:
-            color, status = 0xFFFF00, "❓ Uncertain"
+            color, status = 0xFF5555, "? LOW"
         
         embed = discord.Embed(
             title=f"{profile.get('displayName', profile['name'])}",
@@ -1466,21 +965,12 @@ class TrueOmegaBot(discord.Client):
             timestamp=datetime.utcnow()
         )
         
-        embed.description = f"**@{profile['name']}**\n`Match Confidence: {score:.0%}`"
-        
-        if profile.get('thumbnailUrl'):
-            embed.set_thumbnail(url=profile['thumbnailUrl'])
-        
-        embed.add_field(
-            name="✅ Verification",
-            value="\n".join(f"• {r}" for r in reasons[:4]),
-            inline=False
-        )
+        embed.description = f"**@{profile['name']}** | `{score:.0%} {status}`"
+        embed.add_field(name="🆔 User ID", value=f"`{profile['id']}`", inline=True)
         
         created = str(profile.get('created', 'Unknown'))[:10]
-        embed.add_field(name="🆔 User ID", value=f"`{profile['id']}`", inline=True)
         embed.add_field(name="📅 Created", value=created, inline=True)
-        embed.add_field(name="⚡ Status", value=status, inline=True)
+        embed.add_field(name="⚡ Scan Time", value=f"{scan_time:.2f}s", inline=True)
         
         if profile.get('description'):
             desc = profile['description'][:200]
@@ -1488,356 +978,215 @@ class TrueOmegaBot(discord.Client):
                 desc += "..."
             embed.add_field(name="📝 About", value=desc, inline=False)
         
+        if profile.get('thumbnailUrl'):
+            embed.set_thumbnail(url=profile['thumbnailUrl'])
+        
+        embed.set_footer(text="TRUE OMEGA v3.0")
         return embed
     
-    async def cmd_search(self, interaction: discord.Interaction, username: str):
-        user_id = str(interaction.user.id)
-        
-        if user_id not in self.whitelist:
-            await interaction.response.send_message("⛔ Not whitelisted!", ephemeral=True)
-            return
-        
-        await interaction.response.defer()
-        
-        try:
-            profile = await self.roblox_api.get_user_by_username(username.strip())
-            
-            if profile:
-                result_embed = self._create_profile_embed(profile, 1.0, ["Direct search"])
-                view = ProfileView(profile, self, user_id)
-                await interaction.followup.send(embed=result_embed, view=view)
-                return
-            
-            results = await self.roblox_api.search_users(username.strip(), limit=5)
-            
-            if results:
-                search_embed = discord.Embed(
-                    title=f"🔎 Search Results for '{username}'",
-                    description="Found these users:",
-                    color=0x00D4AA
-                )
-                
-                for r in results[:5]:
-                    name = f"{r.get('displayName', r['name'])} (@{r['name']})"
-                    search_embed.add_field(
-                        name=name,
-                        value=f"[View Profile](https://roblox.com/users/{r['id']}/profile)",
-                        inline=False
-                    )
-                
-                await interaction.followup.send(embed=search_embed)
-            else:
-                await interaction.followup.send(embed=discord.Embed(
-                    title="❌ Not Found",
-                    description=f"No user found matching `@{username}`",
-                    color=0xFF0000
-                ))
-                
-        except Exception as e:
-            logger.error(f"Search error: {e}")
-            await interaction.followup.send(embed=discord.Embed(
-                title="❌ Error",
-                description=str(e)[:200],
-                color=0xFF0000
-            ))
-    
-    async def cmd_download(self, interaction: discord.Interaction, url: str):
-        user_id = str(interaction.user.id)
-        
-        if user_id not in self.whitelist:
-            await interaction.response.send_message("⛔ Not whitelisted!", ephemeral=True)
-            return
-        
-        await interaction.response.defer()
-        
-        parsed = urlparse(url)
-        if not parsed.scheme or not parsed.netloc:
-            await interaction.followup.send(
-                embed=discord.Embed(title="❌ Invalid URL", color=0xFF0000),
-                ephemeral=True
-            )
-            return
-        
-        result = await self.downloader.download(url, user_id)
-        
-        if not result['success']:
-            await interaction.followup.send(embed=discord.Embed(
-                title="❌ Download Failed",
-                description=f"```{result['error'][:500]}```",
-                color=0xFF0000
-            ))
-            return
-        
-        size_mb = result['size'] / (1024 * 1024)
-        if result['size'] > 25 * 1024 * 1024:
-            await interaction.followup.send(embed=discord.Embed(
-                title="❌ File Too Large",
-                description=f"{size_mb:.1f}MB exceeds Discord's 25MB limit\n"
-                           f"Try a shorter video or lower quality.",
-                color=0xFF0000
-            ))
-            self.downloader.cleanup(result['file_path'])
-            return
-        
-        safe_title = re.sub(r'[^\w\-_.]', '_', result['title'][:50])
-        file = discord.File(result['file_path'], filename=f"{safe_title}.mp4")
-        
-        success_embed = discord.Embed(title="✅ Download Complete", color=0x00FF00)
-        success_embed.add_field(name="📹 Title", value=result['title'][:100], inline=False)
-        success_embed.add_field(name="📦 Size", value=f"{size_mb:.1f} MB", inline=True)
-        if result.get('duration'):
-            success_embed.add_field(name="⏱️ Duration", value=f"{result['duration']}s", inline=True)
-        if result.get('uploader'):
-            success_embed.add_field(name="👤 Uploader", value=result['uploader'][:50], inline=True)
-        
-        await interaction.followup.send(embed=success_embed, file=file)
-        self.downloader.cleanup(result['file_path'])
-    
-    async def cmd_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        
-        stats = await self.db.get_user_stats(str(interaction.user.id))
-        
-        embed = discord.Embed(
-            title=f"📊 {interaction.user.name}'s Statistics",
-            color=0x00D4AA,
-            timestamp=datetime.utcnow()
-        )
-        
-        embed.add_field(name="🔍 Total Scans", value=str(stats.total_scans), inline=True)
-        embed.add_field(name="✅ Successful", value=str(stats.successful_scans), inline=True)
-        embed.add_field(name="❌ Failed", value=str(stats.failed_scans), inline=True)
-        embed.add_field(name="📈 Success Rate", value=f"{stats.success_rate:.1f}%", inline=True)
-        
-        if stats.last_scan:
-            embed.add_field(
-                name="🕐 Last Scan",
-                value=stats.last_scan.strftime("%Y-%m-%d %H:%M UTC"),
-                inline=True
-            )
-        
-        if stats.favorite_users:
-            embed.add_field(
-                name="⭐ Recent Finds",
-                value="\n".join(f"• @{u}" for u in stats.favorite_users[:5]),
-                inline=False
-            )
-        
-        embed.set_footer(text="TRUE OMEGA | Ultimate Roblox Scanner")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    
-    async def cmd_history(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        
-        history = await self.db.get_recent_scans(str(interaction.user.id), limit=10)
-        
-        if not history:
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="📜 Scan History",
-                    description="No scans yet! Use `/scan` to find Roblox users.",
-                    color=0xFFA500
-                ),
-                ephemeral=True
-            )
-            return
-        
-        embed = discord.Embed(
-            title="📜 Your Recent Scans",
-            color=0x00D4AA
-        )
-        
-        for h in history:
-            name = f"@{h.get('roblox_username', 'Unknown')}"
-            conf = h.get('confidence', 0)
-            status = "✅" if h.get('success') else "❌"
-            time_str = h.get('scanned_at', 'Unknown')
-            if isinstance(time_str, str):
-                time_str = time_str[:16]
-            embed.add_field(
-                name=f"{status} {name}",
-                value=f"Confidence: {conf:.0%} | {time_str}",
-                inline=False
-            )
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    
-    async def cmd_whitelist(self, interaction: discord.Interaction, user: str):
-        if str(interaction.user.id) != str(Config.OWNER_ID):
+    async def _handle_whitelist(self, interaction: discord.Interaction, user: str):
+        """Handle whitelist management"""
+        # Only owner can use this
+        if str(interaction.user.id) != Config.OWNER_ID:
             await interaction.response.send_message(
                 embed=discord.Embed(title="⛔ Owner Only", color=0xFF0000),
                 ephemeral=True
             )
             return
         
-        await interaction.response.defer(ephemeral=True)
-        
+        # Parse user ID
         target = re.sub(r'[<@!>]', '', user).strip()
         if not target.isdigit():
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 embed=discord.Embed(title="❌ Invalid User ID", color=0xFF0000),
                 ephemeral=True
             )
             return
         
-        try:
-            user_obj = await self.fetch_user(int(target))
-            name = f"@{user_obj.name}" if user_obj else target
-        except:
-            name = target
+        target = str(target)
         
-        if target in self.whitelist:
-            if target == str(Config.OWNER_ID):
+        await interaction.response.defer(ephemeral=True)
+        
+        # Check current status
+        is_whitelisted = self.db.is_whitelisted(target)
+        
+        if is_whitelisted:
+            # Remove from whitelist
+            if target == Config.OWNER_ID:
                 await interaction.followup.send(
-                    embed=discord.Embed(title="⛔ Cannot remove owner!", color=0xFF0000),
+                    embed=discord.Embed(title="⛔ Cannot remove owner", color=0xFF0000),
                     ephemeral=True
                 )
                 return
             
-            await self.db.remove_from_whitelist(target)
-            self.whitelist.remove(target)
-            await self.webhook.log(f"❌ Removed **{name}** from whitelist")
-            await interaction.followup.send(
-                embed=discord.Embed(title=f"❌ Removed {name}", color=0xFF0000),
-                ephemeral=True
-            )
+            success = await self.db.remove_from_whitelist(target)
+            if success:
+                embed = discord.Embed(
+                    title="✅ Removed from Whitelist",
+                    description=f"User ID: `{target}`",
+                    color=0x00FF00
+                )
+            else:
+                embed = discord.Embed(title="❌ Failed to remove", color=0xFF0000)
         else:
-            await self.db.add_to_whitelist(target, str(interaction.user.id))
-            self.whitelist.add(target)
-            await self.webhook.log(f"✅ Added **{name}** to whitelist")
-            await interaction.followup.send(
-                embed=discord.Embed(title=f"✅ Added {name}", color=0x00FF00),
-                ephemeral=True
-            )
+            # Add to whitelist
+            success = await self.db.add_to_whitelist(target, str(interaction.user.id))
+            if success:
+                # Try to get user info
+                try:
+                    user_obj = await self.fetch_user(int(target))
+                    name = f"@{user_obj.name}" if user_obj else target
+                except:
+                    name = target
+                
+                embed = discord.Embed(
+                    title="✅ Added to Whitelist",
+                    description=f"{name} (`{target}`)",
+                    color=0x00FF00
+                )
+            else:
+                embed = discord.Embed(title="❌ Already whitelisted", color=0xFFA500)
+        
+        # Show current count
+        embed.set_footer(text=f"Total whitelisted: {len(self.db.get_whitelist())}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
     
-    async def cmd_help(self, interaction: discord.Interaction):
+    async def _handle_search(self, interaction: discord.Interaction, username: str):
+        if not self.db.is_whitelisted(str(interaction.user.id)):
+            await interaction.response.send_message("⛔ Not whitelisted!", ephemeral=True)
+            return
+        
+        await interaction.response.defer(thinking=True)
+        
+        detected = DetectedUser(username=username, display_name=None, confidence=1.0, source="direct")
+        verified = await self.roblox.verify_users([detected])
+        
+        if verified:
+            best = verified[0]
+            embed = self._create_embed(best['profile'], detected, 0.1, 1.0)
+            view = ResultView(best['profile'], self, str(interaction.user.id))
+            await interaction.followup.send(embed=embed, view=view)
+        else:
+            similar = await self.roblox.search_similar(username)
+            embed = discord.Embed(
+                title=f"🔎 Results for '{username}'",
+                color=0x00D4AA
+            )
+            for s in similar[:5]:
+                embed.add_field(
+                    name=f"{s.get('displayName', s['name'])} (@{s['name']})",
+                    value=f"[View](https://roblox.com/users/{s['id']}/profile)",
+                    inline=False
+                )
+            await interaction.followup.send(embed=embed)
+    
+    async def _handle_stats(self, interaction: discord.Interaction):
+        stats = await self.db.get_user_stats(str(interaction.user.id))
+        
         embed = discord.Embed(
-            title="🎯 TRUE OMEGA ULTIMATE - Help",
-            description="The most advanced Roblox scanner bot with multi-engine OCR.",
+            title=f"📊 {interaction.user.name}'s Stats",
             color=0x00D4AA
         )
+        embed.add_field(name="Total", value=str(stats.total_scans), inline=True)
+        embed.add_field(name="Success", value=f"{stats.success_rate:.1f}%", inline=True)
+        embed.add_field(name="Successful", value=str(stats.successful_scans), inline=True)
         
-        commands = [
-            ("🔍 /scan", "Scan a screenshot to find Roblox users\n`image`: Screenshot to analyze\n`hint`: Optional username hint"),
-            ("🔎 /search", "Search for a Roblox user by username\n`username`: Exact username to search"),
-            ("📥 /download", "Download videos to MP4\n`url`: Video URL (YouTube, TikTok, etc.)"),
-            ("📊 /stats", "View your personal scan statistics"),
-            ("📜 /history", "View your recent scan history"),
-            ("🏓 /ping", "Check bot latency and status"),
-        ]
+        if stats.favorite_users:
+            embed.add_field(
+                name="⭐ Favorites",
+                value="\n".join(f"• @{u}" for u in stats.favorite_users[:5]),
+                inline=False
+            )
         
-        for name, desc in commands:
-            embed.add_field(name=name, value=desc, inline=False)
-        
-        embed.add_field(
-            name="💡 Pro Tips",
-            value="• Use the `hint` option when OCR struggles with stylized fonts\n"
-                  "• Higher resolution screenshots give better results\n"
-                  "• The bot uses Tesseract + EasyOCR + OCR.space for maximum accuracy",
-            inline=False
-        )
-        
-        embed.set_footer(text="TRUE OMEGA ULTIMATE | Railway-Optimized | v2.0")
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    async def cmd_ping(self, interaction: discord.Interaction):
+    async def _handle_ping(self, interaction: discord.Interaction):
         latency = round(self.latency * 1000)
         uptime = timedelta(seconds=int(time.time() - self.start_time))
         
         embed = discord.Embed(title="🏓 Pong!", color=0x00D4AA)
         embed.add_field(name="Latency", value=f"{latency}ms", inline=True)
         embed.add_field(name="Uptime", value=str(uptime), inline=True)
-        embed.add_field(name="Servers", value=str(len(self.guilds)), inline=True)
-        
-        services = []
-        if self.db.pool:
-            services.append("🟢 PostgreSQL")
-        else:
-            services.append("🟡 JSON Fallback")
-        
-        if self.cache.redis:
-            services.append("🟢 Redis")
-        else:
-            services.append("🟡 Memory Cache")
-        
-        services.append("🟢 OCR Engines" if TESSERACT_AVAILABLE or EASYOCR_AVAILABLE else "🔴 No OCR")
-        
-        embed.add_field(name="Services", value="\n".join(services), inline=False)
+        embed.add_field(name="Whitelisted", value=str(len(self.db.get_whitelist())), inline=True)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    async def on_ready(self):
-        logger.info("=" * 50)
-        logger.info(f"✅ BOT ONLINE: {self.user}")
-        logger.info(f"   Servers: {len(self.guilds)}")
-        logger.info(f"   Whitelisted: {len(self.whitelist)} users")
-        logger.info("=" * 50)
-    
-    async def on_error(self, event_method: str, *args, **kwargs):
-        logger.error(f"Error in {event_method}: {traceback.format_exc()}")
-        await self.webhook.log_error(f"Error in {event_method}", {"args": str(args)})
-    
-    async def close(self):
-        logger.info("🛑 Shutting down gracefully...")
-        self._shutting_down = True
+    async def _handle_help(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🎯 TRUE OMEGA v3.0",
+            description="Next-gen Roblox scanner",
+            color=0x00D4AA
+        )
+        commands = [
+            ("/scan <image> [hint]", "Scan screenshot for usernames"),
+            ("/search <username>", "Direct user lookup"),
+            ("/whitelist <user_id>", "Manage whitelist (owner only)"),
+            ("/stats", "Your statistics"),
+            ("/ping", "Bot status"),
+        ]
+        for name, desc in commands:
+            embed.add_field(name=name, value=desc, inline=False)
         
-        if self.ocr.session:
-            await self.ocr.session.close()
-        if self.roblox_api.session:
-            await self.roblox_api.session.close()
-        
-        if self.db.pool:
-            await self.db.pool.close()
-        
-        if self.cache.redis:
-            await self.cache.redis.close()
-        
-        await super().close()
-        logger.info("✅ Shutdown complete")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ═══════════════════════════════════════════════════════════
-# HEALTH CHECK SERVER
+# UI COMPONENTS
 # ═══════════════════════════════════════════════════════════
-async def health_check_server():
+class ResultView(discord.ui.View):
+    def __init__(self, profile: Dict, bot: TrueOmegaBot, user_id: str):
+        super().__init__(timeout=300)
+        self.profile = profile
+        self.bot = bot
+        self.user_id = user_id
+        
+        # Profile link button
+        self.add_item(discord.ui.Button(
+            label="View Profile",
+            style=discord.ButtonStyle.link,
+            url=f"https://roblox.com/users/{profile['id']}/profile",
+            emoji="🔗"
+        ))
+    
+    @discord.ui.button(label="Save", style=discord.ButtonStyle.success, emoji="⭐")
+    async def save(self, interaction: discord.Interaction, button: discord.ui.Button):
+        stats = await self.bot.db.get_user_stats(self.user_id)
+        
+        if self.profile['name'] in stats.favorite_users:
+            await interaction.response.send_message("Already saved!", ephemeral=True)
+            return
+        
+        stats.favorite_users.insert(0, self.profile['name'])
+        stats.favorite_users = stats.favorite_users[:10]
+        await self.bot.db.save_user_stats(stats)
+        
+        await interaction.response.send_message(f"⭐ Saved @{self.profile['name']}!", ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════
+# HEALTH CHECK & MAIN
+# ═══════════════════════════════════════════════════════════
+async def health_server():
     from aiohttp import web
-    
-    async def health(request):
-        return web.Response(text='OK', status=200)
-    
     app = web.Application()
-    app.router.add_get('/health', health)
-    
+    app.router.add_get('/health', lambda r: web.Response(text='OK'))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8080)))
     await site.start()
-    logger.info("✅ Health check server started on port 8080")
 
-# ═══════════════════════════════════════════════════════════
-# MAIN ENTRY POINT
-# ═══════════════════════════════════════════════════════════
 async def main():
-    health_task = asyncio.create_task(health_check_server())
-    
+    health_task = asyncio.create_task(health_server())
     bot = TrueOmegaBot()
     
     try:
         await bot.start(Config.TOKEN)
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
     finally:
         await bot.close()
         health_task.cancel()
 
-def run():
+if __name__ == "__main__":
     while True:
         try:
             asyncio.run(main())
         except Exception as e:
-            logger.error(f"Fatal error: {e}")
-            logger.error(traceback.format_exc())
-            logger.info("Restarting in 10 seconds...")
+            logger.error(f"Fatal: {e}")
             time.sleep(10)
-
-if __name__ == "__main__":
-    run()
