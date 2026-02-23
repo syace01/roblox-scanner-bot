@@ -16,3 +16,6 @@ opencv-python-headless>=4.8.0
 # Database (optional)
 asyncpg>=0.28.0
 redis>=5.0.0
+
+# Video Downloader
+yt-dlp>=2023.12.30
